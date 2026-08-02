@@ -15,6 +15,7 @@ import {
   resumeDownload,
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
+import { loadSettings, saveSettings } from "./store";
 
 function toStatus(status: string): DownloadItem["status"] {
   switch (status) {
@@ -38,6 +39,16 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    loadSettings().then((s) => setSettings(s)).catch(() => {});
+  }, []);
+
+  const handleSaveSettings = (next: AppSettings) => {
+    setSettings(next);
+    if (isTauri) saveSettings(next);
+  };
 
   useEffect(() => {
     if (!isTauri) return;
@@ -197,7 +208,7 @@ export default function App() {
         open={isSettingsOpen}
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
-        onSave={setSettings}
+        onSave={handleSaveSettings}
       />
     </div>
   );
