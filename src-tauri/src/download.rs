@@ -119,6 +119,30 @@ impl Default for DownloadManager {
     }
 }
 
+async fn describe_http_status(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.bytes().await.unwrap_or_default();
+    let body_lower = String::from_utf8_lossy(&body).to_lowercase();
+
+    let cloudflare =
+        body_lower.contains("cloudflare") || body_lower.contains("cf-mitigated") || body_lower.contains("challenge");
+
+    let reason = match status.as_u16() {
+        403 if cloudflare => " — blocked by Cloudflare bot protection (this host refuses non-browser downloads)".to_string(),
+        403 => " — forbidden: the server refuses to serve this file (may require login or a browser)".to_string(),
+        401 => " — unauthorized: the file needs authentication".to_string(),
+        404 => " — not found: the file no longer exists at this URL".to_string(),
+        410 => " — gone: the file has been permanently removed".to_string(),
+        429 => " — too many requests: the server is rate-limiting (try fewer connections)".to_string(),
+        500 => " — server error: the server hit an internal error".to_string(),
+        502 => " — bad gateway: an upstream server failed".to_string(),
+        503 => " — service unavailable: the server is overloaded or down".to_string(),
+        504 => " — gateway timeout: an upstream server timed out".to_string(),
+        n => format!(" (HTTP {n})"),
+    };
+    reason
+}
+
 fn derive_filename(url: &str, content_disposition: Option<&str>) -> (String, String) {
     if let Some(cd) = content_disposition {
         if let Some(start) = cd.find("filename=") {
@@ -203,6 +227,11 @@ async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, 
                 if let Some(total) = cr.rsplit('/').next().and_then(|s| s.parse::<u64>().ok()) {
                     size = Some(total);
                 }
+            }
+        } else if resp.status().is_client_error() || resp.status().is_server_error() {
+            if size.is_none() {
+                let detail = describe_http_status(resp).await;
+                return Err(format!("Probe failed{detail}"));
             }
         }
         if size.is_none() {
@@ -351,11 +380,9 @@ async fn run_segment_inner(
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
             || status == StatusCode::SERVICE_UNAVAILABLE;
+        let detail = describe_http_status(resp).await;
         return Err(SegmentError {
-            message: format!(
-                "server did not honor Range request (status {})",
-                status
-            ),
+            message: format!("download rejected by server{detail}"),
             retriable,
         });
     }
