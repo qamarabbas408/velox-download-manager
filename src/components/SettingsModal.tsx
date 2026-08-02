@@ -100,8 +100,8 @@ export function SettingsModal({
                 ].join(" ")}              >
                 <span
                   className={[
-                    "absolute top-0.5 w-5 h-5 rounded-full bg-ink transition-transform",
-                    draft.resumeEnabled ? "translate-x-[18px]" : "translate-x-0.5",
+                    "absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform",
+                    draft.resumeEnabled ? "translate-x-4" : "translate-x-0",
                   ].join(" ")}
                 />
               </button>
