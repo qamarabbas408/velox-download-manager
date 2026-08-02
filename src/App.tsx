@@ -8,6 +8,7 @@ import { mockDownloads, mockSettings } from "./data/mockDownloads";
 import { formatSpeed } from "./utils/format";
 import {
   cancelDownload,
+  getHistory,
   isTauri,
   listDownloads,
   onDownloadProgress,
@@ -53,25 +54,46 @@ export default function App() {
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
-    listDownloads()
-      .then((saved) => {
-        setDownloads((prev) => {
-          const items = prev.filter((d) => saved.every((s) => s.id !== d.id));
-          const restored: DownloadItem[] = saved.map((s) => ({
-            id: s.id,
-            name: s.name,
-            extension: s.extension,
-            sizeBytes: s.sizeBytes,
-            downloadedBytes: s.downloadedBytes,
-            speedBytesPerSec: 0,
-            etaSeconds: null,
-            status: "downloading",
-            rangeSupported: s.rangeSupported,
-            segments: [],
-            source: s.url,
-            downloadDir: s.downloadDir,
-          }));
-          return [...restored, ...items];
+    getHistory()
+      .then((rows) => {
+        const historyItems: DownloadItem[] = rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          extension: r.extension,
+          sizeBytes: r.sizeBytes,
+          downloadedBytes: r.downloadedBytes,
+          speedBytesPerSec: 0,
+          etaSeconds: null,
+          status: r.status,
+          rangeSupported: r.rangeSupported,
+          segments: [],
+          source: r.url,
+          downloadDir: r.downloadDir,
+          errorMessage: r.errorMessage,
+        }));
+        return listDownloads().then((saved) => {
+          const dedup = new Set(saved.map((s) => s.id));
+          setDownloads((prev) => {
+            const restored: DownloadItem[] = saved.map((s) => ({
+              id: s.id,
+              name: s.name,
+              extension: s.extension,
+              sizeBytes: s.sizeBytes,
+              downloadedBytes: s.downloadedBytes,
+              speedBytesPerSec: 0,
+              etaSeconds: null,
+              status: "downloading",
+              rangeSupported: s.rangeSupported,
+              segments: [],
+              source: s.url,
+              downloadDir: s.downloadDir,
+            }));
+            return [
+              ...restored,
+              ...historyItems.filter((h) => !dedup.has(h.id)),
+              ...prev,
+            ];
+          });
         });
       })
       .catch(() => {});

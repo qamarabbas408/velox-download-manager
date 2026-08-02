@@ -14,6 +14,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+use crate::history;
 use crate::persist;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
@@ -127,14 +128,16 @@ pub struct ActiveDownload {
 pub struct DownloadManager {
     pub client: reqwest::Client,
     pub resume_dir: PathBuf,
+    pub hist: Option<history::HistoryPool>,
     downloads: Mutex<HashMap<String, Arc<ActiveDownload>>>,
 }
 
 impl DownloadManager {
-    pub fn new(resume_dir: PathBuf) -> Self {
+    pub fn new(resume_dir: PathBuf, hist: Option<history::HistoryPool>) -> Self {
         Self {
             client: reqwest::Client::new(),
             resume_dir,
+            hist,
             downloads: Mutex::new(HashMap::new()),
         }
     }
@@ -389,6 +392,43 @@ async fn persist_state_quiet(resume_dir: &std::path::Path, dl: &ActiveDownload) 
     let _ = persist::write_state(&path, &state).await;
 }
 
+async fn write_history(pool: Option<&history::HistoryPool>, dl: &ActiveDownload) {
+    let Some(pool) = pool else { return };
+    let status = *dl.status.lock().await;
+    let downloaded = aggregate(&dl).await.0;
+    let error = dl.last_error.lock().await.clone();
+    let file = dl.file_path.clone();
+    let name = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let extension = file
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bin".to_string());
+    let download_dir = file
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let row = history::DownloadRow {
+        id: dl.id.clone(),
+        name,
+        extension,
+        url: dl.url.clone(),
+        size_bytes: dl.total_size,
+        downloaded_bytes: downloaded,
+        status: history::status_str(&status).to_string(),
+        range_supported: dl.range_supported,
+        segment_count: dl.segment_count,
+        source: dl.url.clone(),
+        download_dir,
+        error_message: error,
+        created_at: history::now_str(),
+        updated_at: history::now_str(),
+    };
+    let _ = history::upsert_download(pool, &row).await;
+}
+
 /// Scan the resume dir and rebuild an in-memory representation for each state
 /// file found (used to surface saved downloads back into the UI on launch).
 pub async fn listed_states(manager: &DownloadManager) -> Vec<persist::ResumeState> {
@@ -527,8 +567,9 @@ async fn run_download(
     dl: Arc<ActiveDownload>,
     client: reqwest::Client,
     resume_dir: PathBuf,
+    hist: Option<history::HistoryPool>,
 ) {
-    run_download_inner(Some(&app), dl, client, &resume_dir).await;
+    run_download_inner(Some(&app), dl, client, &resume_dir, hist.as_ref()).await;
 }
 
 async fn run_download_inner(
@@ -536,6 +577,7 @@ async fn run_download_inner(
     dl: Arc<ActiveDownload>,
     client: reqwest::Client,
     resume_dir: &std::path::Path,
+    hist: Option<&history::HistoryPool>,
 ) {
     {
         let segs = dl.segments.lock().await;
@@ -559,6 +601,7 @@ async fn run_download_inner(
     *dl.status.lock().await = DownloadStatus::Downloading;
     dl.pause_flag.store(false, Ordering::Relaxed);
     dl.speed.store(0, Ordering::Relaxed);
+    write_history(hist, &dl).await;
     if let Some(app) = app {
         emit_progress(app, &dl, 0).await;
     }
@@ -603,16 +646,18 @@ async fn run_download_inner(
                     emit_progress(app, &dl, downloaded).await;
                 }
 
-                // Persist resume state on a ~5s cadence (throttled).
+                // Persist resume state + history on a ~5s cadence (throttled).
                 let mut last_flush = dl.last_state_flush.lock().await;
                 if last_flush.elapsed() >= STATE_FLUSH_INTERVAL {
                     persist_state_quiet(resume_dir, &dl).await;
+                    write_history(hist, &dl).await;
                     *last_flush = Instant::now();
                 }
                 drop(last_flush);
 
                 if *dl.status.lock().await == DownloadStatus::Error {
                     join.abort_all();
+                    write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
                     }
@@ -628,6 +673,7 @@ async fn run_download_inner(
                     }
                     // Flush final offsets on pause even if under the interval.
                     persist_state_quiet(resume_dir, &dl).await;
+                    write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
                     }
@@ -636,6 +682,7 @@ async fn run_download_inner(
                 if done && join.is_empty() {
                     *dl.status.lock().await = DownloadStatus::Completed;
                     persist::delete_state(&persist::state_path(resume_dir, &dl.id)).await;
+                    write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
                     }
@@ -666,6 +713,7 @@ async fn run_download_inner(
                     if give_up {
                         *dl.last_error.lock().await = Some(err.message);
                         *dl.status.lock().await = DownloadStatus::Error;
+                        write_history(hist, &dl).await;
                     } else {
                         set_segment_state(&dl, index, "idle").await;
                         let backoff = RETRY_BACKOFF * (1u32 << attempts.min(4));
@@ -725,7 +773,8 @@ pub async fn start_download(
     manager.downloads.lock().await.insert(request.id, dl.clone());
     let client = manager.client.clone();
     let resume_dir = manager.resume_dir.clone();
-    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir));
+    let hist = manager.hist.clone();
+    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir, hist));
     Ok(())
 }
 
@@ -764,7 +813,8 @@ pub async fn resume_download(
     *dl.last_error.lock().await = None;
     let client = manager.client.clone();
     let resume_dir = manager.resume_dir.clone();
-    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir));
+    let hist = manager.hist.clone();
+    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir, hist));
     Ok(())
 }
 
@@ -862,11 +912,22 @@ pub async fn list_downloads(
             active.insert(id.clone(), dl.clone());
             let client = manager.client.clone();
             let resume_dir = manager.resume_dir.clone();
-            tauri::async_runtime::spawn(run_download(app.clone(), dl, client, resume_dir));
+            let hist = manager.hist.clone();
+            tauri::async_runtime::spawn(run_download(app.clone(), dl, client, resume_dir, hist));
         }
     }
 
     Ok(summaries)
+}
+
+#[tauri::command]
+pub async fn get_history(
+    manager: State<'_, DownloadManager>,
+) -> Result<Vec<history::DownloadRow>, String> {
+    match &manager.hist {
+        Some(pool) => history::fetch_history(pool, 500).await.map_err(|e| e.to_string()),
+        None => Ok(Vec::new()),
+    }
 }
 
 #[cfg(test)]
@@ -1012,7 +1073,7 @@ mod tests {
         });
 
         let client = reqwest::Client::new();
-        run_download_inner(None, dl.clone(), client, &dir).await;
+        run_download_inner(None, dl.clone(), client, &dir, None).await;
 
         assert_eq!(*dl.status.lock().await, DownloadStatus::Completed);
         let got = tokio::fs::read(&file_path).await.unwrap();

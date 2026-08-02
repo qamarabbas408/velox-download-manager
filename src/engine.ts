@@ -47,6 +47,23 @@ export interface ResumeSummary {
   progressPercent: number;
 }
 
+export interface HistoryRow {
+  id: string;
+  name: string;
+  extension: string;
+  url: string;
+  sizeBytes: number;
+  downloadedBytes: number;
+  status: "queued" | "downloading" | "paused" | "completed" | "error";
+  rangeSupported: boolean;
+  segmentCount: number;
+  source: string;
+  downloadDir: string;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export function probeUrl(url: string): Promise<ProbeResult> {
   return invoke("probe_url", { url });
 }
@@ -69,6 +86,10 @@ export function cancelDownload(id: string): Promise<void> {
 
 export function listDownloads(): Promise<ResumeSummary[]> {
   return invoke("list_downloads");
+}
+
+export function getHistory(): Promise<HistoryRow[]> {
+  return invoke("get_history");
 }
 
 export function onDownloadProgress(
