@@ -102,6 +102,14 @@ pub async fn fetch_history(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<Do
     Ok(out)
 }
 
+pub async fn delete_history(pool: &SqlitePool, id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM downloads WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 fn row_from_sql(r: &sqlx::sqlite::SqliteRow) -> DownloadRow {
     DownloadRow {
         id: r.get("id"),

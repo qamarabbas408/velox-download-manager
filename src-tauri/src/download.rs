@@ -833,7 +833,32 @@ pub async fn cancel_download(
     dl.cancel_flag.store(true, Ordering::Relaxed);
     let _ = tokio::fs::remove_file(&dl.file_path).await;
     persist::delete_state(&state_path(&manager, &id)).await;
+    if let Some(pool) = &manager.hist {
+        let _ = history::delete_history(pool, &id).await;
+    }
     manager.downloads.lock().await.remove(&id);
+    Ok(())
+}
+
+// Remove a download from the list entirely — whether it is currently active or
+// a completed/history entry. Cancels and deletes the file if it exists, removes
+// any resume state, and deletes the history row.
+#[tauri::command]
+pub async fn remove_download(
+    manager: State<'_, DownloadManager>,
+    id: String,
+) -> Result<(), String> {
+    if let Some(dl) = manager.downloads.lock().await.remove(&id) {
+        dl.cancel_flag.store(true, Ordering::Relaxed);
+        let _ = tokio::fs::remove_file(&dl.file_path).await;
+        persist::delete_state(&state_path(&manager, &id)).await;
+    } else {
+        // Might be a history entry only — still clear any orphaned file/state.
+        persist::delete_state(&state_path(&manager, &id)).await;
+    }
+    if let Some(pool) = &manager.hist {
+        let _ = history::delete_history(pool, &id).await;
+    }
     Ok(())
 }
 

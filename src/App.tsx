@@ -7,12 +7,12 @@ import { SettingsModal } from "./components/SettingsModal";
 import { mockDownloads, mockSettings } from "./data/mockDownloads";
 import { formatSpeed } from "./utils/format";
 import {
-  cancelDownload,
   getHistory,
   isTauri,
   listDownloads,
   onDownloadProgress,
   pauseDownload,
+  removeDownload,
   resumeDownload,
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
@@ -177,7 +177,7 @@ export default function App() {
   };
 
   const handleRemove = (id: string) => {
-    if (isTauri) cancelDownload(id).catch(() => {});
+    if (isTauri) removeDownload(id);
     setDownloads((prev) => prev.filter((d) => d.id !== id));
   };
 

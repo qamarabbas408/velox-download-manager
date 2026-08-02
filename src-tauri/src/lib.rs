@@ -2,7 +2,7 @@ mod download;
 mod history;
 mod persist;
 
-use download::{cancel_download, get_history, list_downloads, pause_download, probe_url, resume_download, start_download, DownloadManager};
+use download::{cancel_download, get_history, list_downloads, pause_download, probe_url, remove_download, resume_download, start_download, DownloadManager};
 use tauri::Manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -33,6 +33,7 @@ pub fn run() {
             pause_download,
             resume_download,
             cancel_download,
+            remove_download,
             list_downloads,
             get_history,
         ])
