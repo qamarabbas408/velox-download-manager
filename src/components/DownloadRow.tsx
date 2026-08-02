@@ -198,6 +198,11 @@ export function DownloadRow({
               </>
             )}
           </div>
+          {item.status === "error" && item.errorMessage && (
+            <p className="mt-1.5 font-mono text-[11px] text-danger/90 truncate">
+              {item.errorMessage}
+            </p>
+          )}
         </div>
 
         <RowActions

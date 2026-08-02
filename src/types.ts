@@ -28,6 +28,7 @@ export interface DownloadItem {
   segments: SegmentInfo[];
   source: string;
   downloadDir: string;
+  errorMessage?: string | null;
 }
 
 export interface SidebarSection {

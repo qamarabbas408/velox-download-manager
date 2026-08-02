@@ -3,8 +3,9 @@ import { X, Loader2, Link2, ShieldCheck, ShieldAlert, Gauge, Plus, FolderOpen } 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { AppSettings, DownloadItem, ProbeResult } from "../types";
 import { formatBytes } from "../utils/format";
+import { isTauri, probeUrl as engineProbe, startDownload } from "../engine";
 
-function probeUrl(url: string): ProbeResult {
+function mockProbe(url: string): ProbeResult {
   const parsed = new URL(url);
   const raw = parsed.pathname.split("/").filter(Boolean).pop() ?? "download";
   const dot = raw.lastIndexOf(".");
@@ -38,13 +39,12 @@ export function AddDownloadModal({
   const [url, setUrl] = useState("");
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [connections, setConnections] = useState(settings.defaultSegments);
   const [downloadDir, setDownloadDir] = useState(settings.downloadDir);
 
   const maxConnections = Math.min(settings.maxConnections, 32);
-  const effectiveConnections = probe?.rangeSupported
-    ? connections
-    : 1;
+  const effectiveConnections = probe?.rangeSupported ? connections : 1;
 
   const validUrl = useMemo(() => {
     try {
@@ -57,13 +57,19 @@ export function AddDownloadModal({
 
   if (!open) return null;
 
-  const handleProbe = () => {
+  const handleProbe = async () => {
     if (!validUrl) return;
     setProbing(true);
-    setTimeout(() => {
-      setProbe(probeUrl(url));
+    setError(null);
+    setProbe(null);
+    try {
+      const result = isTauri ? await engineProbe(url) : await new Promise<ProbeResult>((res) => setTimeout(() => res(mockProbe(url)), 600));
+      setProbe(result);
+    } catch (e) {
+      setError(String(e));
+    } finally {
       setProbing(false);
-    }, 600);
+    }
   };
 
   const handleBrowse = async () => {
@@ -71,8 +77,9 @@ export function AddDownloadModal({
     if (typeof dir === "string") setDownloadDir(dir);
   };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!probe) return;
+    const id = crypto.randomUUID();
     const chunk = Math.floor(probe.sizeBytes / effectiveConnections);
     const segments = Array.from({ length: effectiveConnections }, (_, i) => ({
       index: i,
@@ -85,7 +92,7 @@ export function AddDownloadModal({
     const speed = effectiveConnections * 2.4 * 1024 * 1024;
 
     onAdd({
-      id: crypto.randomUUID(),
+      id,
       name: probe.name,
       extension: probe.extension,
       sizeBytes: probe.sizeBytes,
@@ -98,6 +105,24 @@ export function AddDownloadModal({
       source: probe.url,
       downloadDir,
     });
+
+    if (isTauri) {
+      try {
+        await startDownload({
+          id,
+          url: probe.url,
+          name: probe.name,
+          extension: probe.extension,
+          sizeBytes: probe.sizeBytes,
+          downloadDir,
+          rangeSupported: probe.rangeSupported,
+          segments: effectiveConnections,
+        });
+      } catch (e) {
+        setError(String(e));
+        return;
+      }
+    }
 
     setUrl("");
     setProbe(null);
@@ -124,6 +149,7 @@ export function AddDownloadModal({
               onChange={(e) => {
                 setUrl(e.target.value);
                 setProbe(null);
+                setError(null);
               }}
               placeholder="https://example.com/file.zip"
               className="bg-transparent text-sm text-ink placeholder:text-dim outline-none w-full"
@@ -137,6 +163,10 @@ export function AddDownloadModal({
               Analyze
             </button>
           </div>
+
+          {error && (
+            <p className="text-xs text-danger">{error}</p>
+          )}
 
           {probe && (
             <div className="rounded-xl border border-line bg-raised/50 p-4 space-y-3">

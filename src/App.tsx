@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { DownloadRow } from "./components/DownloadRow";
@@ -6,15 +6,73 @@ import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { mockDownloads, mockSettings } from "./data/mockDownloads";
 import { formatSpeed } from "./utils/format";
-import type { AppSettings, DownloadItem, SidebarSection } from "./types";
+import {
+  cancelDownload,
+  isTauri,
+  onDownloadProgress,
+  pauseDownload,
+  resumeDownload,
+} from "./engine";
+import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
+
+function toStatus(status: string): DownloadItem["status"] {
+  switch (status) {
+    case "downloading":
+    case "paused":
+    case "completed":
+    case "queued":
+    case "error":
+      return status;
+    default:
+      return "error";
+  }
+}
 
 export default function App() {
-  const [downloads, setDownloads] = useState<DownloadItem[]>(mockDownloads);
+  const [downloads, setDownloads] = useState<DownloadItem[]>(() =>
+    isTauri ? [] : mockDownloads
+  );
   const [settings, setSettings] = useState<AppSettings>(mockSettings);
   const [activeId, setActiveId] = useState("all");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    onDownloadProgress((p) => {
+      setDownloads((prev) => {
+        const segments: SegmentInfo[] = p.segments.map((s) => ({
+          index: s.index,
+          start: s.start,
+          end: s.end,
+          downloaded: s.current - s.start,
+          state: s.state,
+        }));
+        const existing = prev.find((d) => d.id === p.id);
+        if (!existing) return prev;
+        const remaining = p.totalBytes - p.downloadedBytes;
+        const eta = p.speedBytesPerSec > 0 ? Math.round(remaining / p.speedBytesPerSec) : null;
+        return prev.map((d) =>
+          d.id === p.id
+            ? {
+                ...d,
+                status: toStatus(p.status),
+                downloadedBytes: p.downloadedBytes,
+                speedBytesPerSec: p.speedBytesPerSec,
+                etaSeconds: eta,
+                errorMessage: p.error ?? null,
+                segments,
+              }
+            : d
+        );
+      });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
 
   const countByStatus = (status: string) =>
     downloads.filter((d) => d.status === status).length;
@@ -52,7 +110,18 @@ export default function App() {
     );
   };
 
-  const removeDownload = (id: string) => {
+  const handlePause = (id: string) => {
+    if (isTauri) pauseDownload(id).catch(() => {});
+    updateStatus(id, "paused");
+  };
+
+  const handleResume = (id: string) => {
+    if (isTauri) resumeDownload(id).catch(() => {});
+    updateStatus(id, "downloading");
+  };
+
+  const handleRemove = (id: string) => {
+    if (isTauri) cancelDownload(id).catch(() => {});
     setDownloads((prev) => prev.filter((d) => d.id !== id));
   };
 
@@ -71,18 +140,23 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto">
           {visibleDownloads.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-muted">
-              <p className="text-sm">No downloads here</p>
+            <div className="h-full flex flex-col items-center justify-center text-muted gap-2">
+              <p className="text-sm">No downloads yet</p>
+              {isTauri && (
+                <p className="text-xs text-dim">
+                  Paste a URL and hit “Add download” to start a real segmented download.
+                </p>
+              )}
             </div>
           ) : (
             visibleDownloads.map((item) => (
               <DownloadRow
                 key={item.id}
                 item={item}
-                onPause={() => updateStatus(item.id, "paused")}
-                onResume={() => updateStatus(item.id, "downloading")}
-                onRetry={() => updateStatus(item.id, "downloading")}
-                onRemove={() => removeDownload(item.id)}
+                onPause={() => handlePause(item.id)}
+                onResume={() => handleResume(item.id)}
+                onRetry={() => handleResume(item.id)}
+                onRemove={() => handleRemove(item.id)}
               />
             ))
           )}
