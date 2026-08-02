@@ -9,6 +9,7 @@ import { formatSpeed } from "./utils/format";
 import {
   cancelDownload,
   isTauri,
+  listDownloads,
   onDownloadProgress,
   pauseDownload,
   resumeDownload,
@@ -41,6 +42,28 @@ export default function App() {
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
+    listDownloads()
+      .then((saved) => {
+        setDownloads((prev) => {
+          const items = prev.filter((d) => saved.every((s) => s.id !== d.id));
+          const restored: DownloadItem[] = saved.map((s) => ({
+            id: s.id,
+            name: s.name,
+            extension: s.extension,
+            sizeBytes: s.sizeBytes,
+            downloadedBytes: s.downloadedBytes,
+            speedBytesPerSec: 0,
+            etaSeconds: null,
+            status: "downloading",
+            rangeSupported: s.rangeSupported,
+            segments: [],
+            source: s.url,
+            downloadDir: s.downloadDir,
+          }));
+          return [...restored, ...items];
+        });
+      })
+      .catch(() => {});
     onDownloadProgress((p) => {
       setDownloads((prev) => {
         const segments: SegmentInfo[] = p.segments.map((s) => ({

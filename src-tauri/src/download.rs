@@ -14,9 +14,12 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+use crate::persist;
+
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_SEGMENT_RETRIES: u32 = 12;
 const RETRY_BACKOFF: Duration = Duration::from_millis(800);
+const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct SegmentError {
@@ -89,6 +92,21 @@ pub struct DownloadProgress {
     pub segments: Vec<SegmentState>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeSummary {
+    pub id: String,
+    pub url: String,
+    pub name: String,
+    pub extension: String,
+    pub download_dir: String,
+    pub size_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub range_supported: bool,
+    pub segment_count: usize,
+    pub progress_percent: u64,
+}
+
 pub struct ActiveDownload {
     pub id: String,
     pub url: String,
@@ -103,17 +121,20 @@ pub struct ActiveDownload {
     pub segments: Mutex<Vec<SegmentState>>,
     pub retries: Mutex<HashMap<usize, u32>>,
     pub speed: AtomicU64,
+    pub last_state_flush: Mutex<Instant>,
 }
 
 pub struct DownloadManager {
     pub client: reqwest::Client,
+    pub resume_dir: PathBuf,
     downloads: Mutex<HashMap<String, Arc<ActiveDownload>>>,
 }
 
-impl Default for DownloadManager {
-    fn default() -> Self {
+impl DownloadManager {
+    pub fn new(resume_dir: PathBuf) -> Self {
         Self {
             client: reqwest::Client::new(),
+            resume_dir,
             downloads: Mutex::new(HashMap::new()),
         }
     }
@@ -334,6 +355,92 @@ async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
     );
 }
 
+fn state_path(manager: &DownloadManager, id: &str) -> PathBuf {
+    manager.resume_dir.join(format!("{id}.json"))
+}
+
+async fn snapshot_state(dl: &ActiveDownload) -> persist::ResumeState {
+    let segments = dl
+        .segments
+        .lock()
+        .await
+        .iter()
+        .map(|s| persist::StateSegment {
+            index: s.index,
+            start: s.start,
+            end: s.end,
+            current: s.current,
+        })
+        .collect();
+    persist::ResumeState {
+        id: dl.id.clone(),
+        url: dl.url.clone(),
+        file_path: dl.file_path.to_string_lossy().into_owned(),
+        total_size: dl.total_size,
+        range_supported: dl.range_supported,
+        segment_count: dl.segment_count,
+        segments,
+    }
+}
+
+async fn persist_state_quiet(resume_dir: &std::path::Path, dl: &ActiveDownload) {
+    let path = persist::state_path(resume_dir, &dl.id);
+    let state = snapshot_state(dl).await;
+    let _ = persist::write_state(&path, &state).await;
+}
+
+/// Scan the resume dir and rebuild an in-memory representation for each state
+/// file found (used to surface saved downloads back into the UI on launch).
+pub async fn listed_states(manager: &DownloadManager) -> Vec<persist::ResumeState> {
+    let mut out = Vec::new();
+    for path in persist::list_state_paths(&manager.resume_dir).await {
+        if let Some(state) = persist::read_state(&path).await {
+            out.push(state);
+        }
+    }
+    out
+}
+
+/// Attempt to restore a download's segments from its saved state file.
+/// Returns true if a valid resumable state was loaded. Only resumable when the
+/// server supports ranges — otherwise we must start from scratch.
+async fn try_restore(dl: &ActiveDownload, resume_dir: &std::path::Path) -> bool {
+    if !dl.range_supported {
+        return false;
+    }
+    let path = persist::state_path(resume_dir, &dl.id);
+    let state = match persist::read_state(&path).await {
+        Some(s) => s,
+        None => return false,
+    };
+    if state.segments.is_empty() {
+        return false;
+    }
+    let mut segs: Vec<SegmentState> = state
+        .segments
+        .iter()
+        .map(|s| SegmentState {
+            index: s.index,
+            start: s.start,
+            end: s.end,
+            current: s.current,
+            state: if s.current >= s.end { "done" } else { "idle" },
+        })
+        .collect();
+    let all_done = segs.iter().all(|s| s.state == "done");
+    if all_done {
+        return false;
+    }
+    // Truncate the file off any excess in case a previous run preallocated a
+    // larger size than the final completed file.
+    if let Ok(f) = OpenOptions::new().write(true).open(&dl.file_path).await {
+        let _ = f.set_len(dl.total_size).await;
+    }
+    segs.sort_by_key(|s| s.index);
+    *dl.segments.lock().await = segs;
+    true
+}
+
 async fn run_segment(
     dl: Arc<ActiveDownload>,
     client: reqwest::Client,
@@ -415,14 +522,20 @@ async fn run_segment_inner(
     Ok(())
 }
 
-async fn run_download(app: AppHandle, dl: Arc<ActiveDownload>, client: reqwest::Client) {
-    run_download_inner(Some(&app), dl, client).await;
+async fn run_download(
+    app: AppHandle,
+    dl: Arc<ActiveDownload>,
+    client: reqwest::Client,
+    resume_dir: PathBuf,
+) {
+    run_download_inner(Some(&app), dl, client, &resume_dir).await;
 }
 
 async fn run_download_inner(
     app: Option<&AppHandle>,
     dl: Arc<ActiveDownload>,
     client: reqwest::Client,
+    resume_dir: &std::path::Path,
 ) {
     {
         let segs = dl.segments.lock().await;
@@ -490,6 +603,14 @@ async fn run_download_inner(
                     emit_progress(app, &dl, downloaded).await;
                 }
 
+                // Persist resume state on a ~5s cadence (throttled).
+                let mut last_flush = dl.last_state_flush.lock().await;
+                if last_flush.elapsed() >= STATE_FLUSH_INTERVAL {
+                    persist_state_quiet(resume_dir, &dl).await;
+                    *last_flush = Instant::now();
+                }
+                drop(last_flush);
+
                 if *dl.status.lock().await == DownloadStatus::Error {
                     join.abort_all();
                     if let Some(app) = app {
@@ -505,6 +626,8 @@ async fn run_download_inner(
                             s.state = "idle";
                         }
                     }
+                    // Flush final offsets on pause even if under the interval.
+                    persist_state_quiet(resume_dir, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
                     }
@@ -512,6 +635,7 @@ async fn run_download_inner(
                 }
                 if done && join.is_empty() {
                     *dl.status.lock().await = DownloadStatus::Completed;
+                    persist::delete_state(&persist::state_path(resume_dir, &dl.id)).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
                     }
@@ -590,11 +714,18 @@ pub async fn start_download(
         segments: Mutex::new(Vec::new()),
         retries: Mutex::new(HashMap::new()),
         speed: AtomicU64::new(0),
+        last_state_flush: Mutex::new(Instant::now()),
     });
+
+    let restored = try_restore(&dl, &manager.resume_dir).await;
+    if !restored {
+        let _ = persist::delete_state(&state_path(&manager, &request.id)).await;
+    }
 
     manager.downloads.lock().await.insert(request.id, dl.clone());
     let client = manager.client.clone();
-    tauri::async_runtime::spawn(run_download(app, dl, client));
+    let resume_dir = manager.resume_dir.clone();
+    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir));
     Ok(())
 }
 
@@ -632,7 +763,8 @@ pub async fn resume_download(
     dl.retries.lock().await.clear();
     *dl.last_error.lock().await = None;
     let client = manager.client.clone();
-    tauri::async_runtime::spawn(run_download(app, dl, client));
+    let resume_dir = manager.resume_dir.clone();
+    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir));
     Ok(())
 }
 
@@ -650,8 +782,91 @@ pub async fn cancel_download(
         .ok_or("download not found")?;
     dl.cancel_flag.store(true, Ordering::Relaxed);
     let _ = tokio::fs::remove_file(&dl.file_path).await;
+    persist::delete_state(&state_path(&manager, &id)).await;
     manager.downloads.lock().await.remove(&id);
     Ok(())
+}
+
+// Resume a saved download from its state file. Called from the frontend on
+// launch to hydrate in-progress downloads. Returns a summary of what was found.
+#[tauri::command]
+pub async fn list_downloads(
+    app: AppHandle,
+    manager: State<'_, DownloadManager>,
+) -> Result<Vec<ResumeSummary>, String> {
+    let states = listed_states(&manager).await;
+    let mut summaries = Vec::new();
+    let mut active = manager.downloads.lock().await;
+
+    for state in states {
+        if active.contains_key(&state.id) {
+            continue;
+        }
+        let file_path = PathBuf::from(&state.file_path);
+        let name = file_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "download".to_string());
+        let extension = file_path
+            .extension()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "bin".to_string());
+        let download_dir = file_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let downloaded: u64 = state.segments.iter().map(|s| s.current.saturating_sub(s.start)).sum();
+        let progress_percent = if state.total_size > 0 {
+            ((downloaded as f64 / state.total_size as f64) * 100.0) as u64
+        } else {
+            0
+        };
+
+        summaries.push(ResumeSummary {
+            id: state.id.clone(),
+            url: state.url.clone(),
+            name: name.clone(),
+            extension,
+            download_dir,
+            size_bytes: state.total_size,
+            downloaded_bytes: downloaded,
+            range_supported: state.range_supported,
+            segment_count: state.segment_count,
+            progress_percent,
+        });
+
+        // Only auto-resume downloads that can actually continue.
+        if !state.range_supported {
+            persist::delete_state(&manager.resume_dir.join(format!("{}.json", state.id))).await;
+            continue;
+        }
+
+        let dl = Arc::new(ActiveDownload {
+            id: state.id.clone(),
+            url: state.url.clone(),
+            file_path,
+            total_size: state.total_size,
+            range_supported: state.range_supported,
+            segment_count: state.segment_count,
+            status: Mutex::new(DownloadStatus::Queued),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            segments: Mutex::new(Vec::new()),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+        });
+        if try_restore(&dl, &manager.resume_dir).await {
+            let id = dl.id.clone();
+            active.insert(id.clone(), dl.clone());
+            let client = manager.client.clone();
+            let resume_dir = manager.resume_dir.clone();
+            tauri::async_runtime::spawn(run_download(app.clone(), dl, client, resume_dir));
+        }
+    }
+
+    Ok(summaries)
 }
 
 #[cfg(test)]
@@ -793,10 +1008,11 @@ mod tests {
             segments: Mutex::new(Vec::new()),
             retries: Mutex::new(HashMap::new()),
             speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
-        run_download_inner(None, dl.clone(), client).await;
+        run_download_inner(None, dl.clone(), client, &dir).await;
 
         assert_eq!(*dl.status.lock().await, DownloadStatus::Completed);
         let got = tokio::fs::read(&file_path).await.unwrap();

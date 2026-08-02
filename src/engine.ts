@@ -34,6 +34,19 @@ export interface EngineProgress {
   segments: EngineSegment[];
 }
 
+export interface ResumeSummary {
+  id: string;
+  url: string;
+  name: string;
+  extension: string;
+  downloadDir: string;
+  sizeBytes: number;
+  downloadedBytes: number;
+  rangeSupported: boolean;
+  segmentCount: number;
+  progressPercent: number;
+}
+
 export function probeUrl(url: string): Promise<ProbeResult> {
   return invoke("probe_url", { url });
 }
@@ -52,6 +65,10 @@ export function resumeDownload(id: string): Promise<void> {
 
 export function cancelDownload(id: string): Promise<void> {
   return invoke("cancel_download", { id });
+}
+
+export function listDownloads(): Promise<ResumeSummary[]> {
+  return invoke("list_downloads");
 }
 
 export function onDownloadProgress(
