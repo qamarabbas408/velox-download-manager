@@ -1,6 +1,7 @@
-import { Zap, Settings } from "lucide-react";
+import { Settings, Sun, Moon } from "lucide-react";
 import type { SidebarSection } from "../types";
-
+import { useTheme } from "../theme";
+import logo from "../assets/logo.png";
 export function Sidebar({
   sections,
   activeId,
@@ -12,6 +13,7 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onOpenSettings: () => void;
 }) {
+  const { theme, toggleTheme } = useTheme();
   const totalBytes = 2.1 * 1024 * 1024 * 1024 * 1024;
   const usedBytes = 1.9 * 1024 * 1024 * 1024 * 1024;
   const usedPercent = Math.round((usedBytes / totalBytes) * 100);
@@ -19,10 +21,15 @@ export function Sidebar({
   return (
     <aside className="w-64 shrink-0 h-full bg-surface border-r border-line flex flex-col">
       <div className="flex items-center gap-2.5 px-5 h-16 border-b border-line">
-        <div className="w-7 h-7 rounded-md bg-signal/15 flex items-center justify-center">
-          <Zap className="w-4 h-4 text-signal" fill="currentColor" />
+        <img src={logo} alt="Velox" className="w-8 h-8 rounded-md object-contain" />
+        <div className="leading-none">
+          <span className="block font-display font-bold text-lg brand-gradient-text tracking-tight">
+            Velox
+          </span>
+          <span className="block text-[10px] font-medium uppercase tracking-[0.18em] text-dim mt-0.5">
+            Download manager
+          </span>
         </div>
-        <span className="font-display font-semibold text-base tracking-tight">Velox</span>
       </div>
 
       <nav className="flex-1 px-3 py-4 space-y-0.5">
@@ -42,8 +49,8 @@ export function Sidebar({
               <span className="flex items-center gap-2.5">
                 <span
                   className={[
-                    "w-1.5 h-1.5 rounded-full",
-                    isActive ? "bg-signal" : "bg-dim",
+                    "w-1.5 h-1.5 rounded-full transition-colors",
+                    isActive ? "bg-signal shadow-[0_0_6px_rgba(13,163,238,0.9)]" : "bg-dim",
                   ].join(" ")}
                 />
                 {section.label}
@@ -61,7 +68,7 @@ export function Sidebar({
         </div>
         <div className="h-1.5 rounded-full bg-raised overflow-hidden">
           <div
-            className="h-full rounded-full bg-signal"
+            className="h-full rounded-full brand-bar"
             style={{ width: `${usedPercent}%` }}
           />
         </div>
@@ -71,6 +78,15 @@ export function Sidebar({
         >
           <Settings className="w-4 h-4" />
           Settings
+        </button>
+        <button
+          onClick={toggleTheme}
+          aria-label="Toggle theme"
+          title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          className="w-full flex items-center gap-2 mt-1 text-sm text-muted hover:text-ink"
+        >
+          {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          {theme === "dark" ? "Light theme" : "Dark theme"}
         </button>
       </div>
     </aside>

@@ -18,14 +18,13 @@ export function Toolbar({
       <div className="flex items-center gap-3">
         <button
           onClick={onAdd}
-          className="flex items-center gap-1.5 bg-signal text-base font-medium text-sm px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-          style={{ color: "#0B0D10" }}
+          className="btn-primary flex items-center gap-1.5 text-sm font-medium px-3.5 py-2 rounded-lg transition-all"
         >
           <Plus className="w-4 h-4" strokeWidth={2.5} />
           Add download
         </button>
 
-        <div className="flex items-center gap-2 bg-surface border border-line rounded-lg px-3 py-2 w-72">
+        <div className="flex items-center gap-2 bg-surface border border-line rounded-lg px-3 py-2 w-72 focus-within:border-signal/50 focus-within:ring-1 focus-within:ring-signal/30 transition-all">
           <Search className="w-4 h-4 text-dim" />
           <input
             type="text"
@@ -37,11 +36,13 @@ export function Toolbar({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 font-mono text-sm text-muted">
-        <ArrowDown className="w-4 h-4 text-signal" />
-        <span className="text-ink">{totalSpeedLabel}</span>
+      <div className="flex items-center gap-2 font-mono text-sm">
+        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-signal/10 text-signal">
+          <ArrowDown className="w-4 h-4" />
+          <span>{totalSpeedLabel}</span>
+        </span>
         <span className="text-dim">·</span>
-        <span>{activeCount} active</span>
+        <span className="text-muted">{activeCount} active</span>
       </div>
     </div>
   );

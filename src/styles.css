@@ -1,8 +1,40 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --base: 11 13 16;
+  --surface: 20 23 28;
+  --raised: 27 31 38;
+  --line: 55 61 71;
+  --ink: 237 239 242;
+  --muted: 138 145 156;
+  --dim: 90 97 108;
+  --signal: 13 163 238;
+  --signal-mid: 9 129 204;
+  --signal-deep: 1 44 88;
+  --complete: 51 214 166;
+  --paused: 232 184 75;
+  --danger: 240 83 61;
+}
+
+[data-theme="light"] {
+  --base: 246 247 249;
+  --surface: 255 255 255;
+  --raised: 238 240 244;
+  --line: 224 228 235;
+  --ink: 20 23 28;
+  --muted: 92 100 112;
+  --dim: 140 148 160;
+  --signal: 10 128 209;
+  --signal-mid: 2 94 161;
+  --signal-deep: 1 44 88;
+  --complete: 5 150 105;
+  --paused: 180 140 10;
+  --danger: 220 38 38;
+}
 
 html, body, #root {
   height: 100%;
@@ -10,6 +42,7 @@ html, body, #root {
 
 body {
   @apply bg-base text-ink font-body antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 ::-webkit-scrollbar {
@@ -17,9 +50,49 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2f38;
+  background: rgba(var(--dim) / 0.5);
   border-radius: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+@layer components {
+  /* Brand wordmark — logo-derived cyan → blue → deep-navy gradient */
+  .brand-gradient-text {
+    background-image: linear-gradient(110deg, #6fd6ff 0%, #0da3ee 45%, #0981cc 75%, #012c58 110%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  [data-theme="light"] .brand-gradient-text {
+    background-image: linear-gradient(110deg, #0da3ee 0%, #0981cc 55%, #012c58 100%);
+  }
+
+  /* Primary action buttons — brand gradient, white label */
+  .btn-primary {
+    background-image: linear-gradient(135deg, #0da3ee 0%, #0981cc 100%);
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  }
+  .btn-primary:hover {
+    background-image: linear-gradient(135deg, #2db4f2 0%, #0a80d1 100%);
+    box-shadow: 0 0 0 1px rgba(13, 163, 238, 0.35), 0 4px 16px -6px rgba(13, 163, 238, 0.55);
+  }
+  .btn-primary:disabled {
+    opacity: 0.4;
+    box-shadow: none;
+  }
+
+  /* Brand fill bar (progress / meter) */
+  .brand-bar {
+    background-image: linear-gradient(90deg, #0a80d1 0%, #0da3ee 100%);
+  }
+
+  /* Soft brand glow ring on focus */
+  .focus-brand {
+    @apply focus:outline-none focus:ring-2 focus:ring-signal/40 focus:ring-offset-0;
+  }
+}
+

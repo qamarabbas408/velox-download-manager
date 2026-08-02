@@ -50,7 +50,7 @@ export function SettingsModal({
                 max={32}
                 value={draft.maxConnections}
                 onChange={(e) => setDraft({ ...draft, maxConnections: Number(e.target.value) })}
-                className="w-full accent-[#FF6B2C]"
+                className="w-full accent-[#0DA3EE]"
               />
             </div>
 
@@ -65,7 +65,7 @@ export function SettingsModal({
                 max={draft.maxConnections}
                 value={draft.defaultSegments}
                 onChange={(e) => setDraft({ ...draft, defaultSegments: Number(e.target.value) })}
-                className="w-full accent-[#FF6B2C]"
+                className="w-full accent-[#0DA3EE]"
               />
             </div>
           </div>
@@ -97,8 +97,7 @@ export function SettingsModal({
                 className={[
                   "w-10 h-6 rounded-full transition-colors relative",
                   draft.resumeEnabled ? "bg-signal" : "bg-raised",
-                ].join(" ")}
-              >
+                ].join(" ")}              >
                 <span
                   className={[
                     "absolute top-0.5 w-5 h-5 rounded-full bg-ink transition-transform",
@@ -122,8 +121,7 @@ export function SettingsModal({
               onSave(draft);
               onClose();
             }}
-            className="px-3.5 py-2 rounded-lg bg-signal text-sm font-medium hover:opacity-90 transition-opacity"
-            style={{ color: "#0B0D10" }}
+            className="btn-primary px-3.5 py-2 rounded-lg text-sm font-medium transition-all"
           >
             Save
           </button>

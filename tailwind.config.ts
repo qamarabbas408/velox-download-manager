@@ -2,24 +2,27 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  darkMode: "class",
   theme: {
     extend: {
       colors: {
-        base: "#0B0D10",       // app background
-        surface: "#14171C",    // panels
-        raised: "#1B1F26",     // rows, unfilled track
-        line: "rgba(255,255,255,0.07)",
-        ink: "#EDEFF2",        // primary text
-        muted: "#8A919C",      // secondary text
-        dim: "#5A616C",        // tertiary / labels
-        signal: "#FF6B2C",     // primary accent — active/downloading
-        complete: "#33D6A6",   // success / finished
-        paused: "#E8B84B",     // paused state
-        danger: "#F0533D",     // error state
+        base: "rgb(var(--base) / <alpha-value>)",
+        surface: "rgb(var(--surface) / <alpha-value>)",
+        raised: "rgb(var(--raised) / <alpha-value>)",
+        line: "rgb(var(--line) / <alpha-value>)",
+        ink: "rgb(var(--ink) / <alpha-value>)",
+        muted: "rgb(var(--muted) / <alpha-value>)",
+        dim: "rgb(var(--dim) / <alpha-value>)",
+        signal: "rgb(var(--signal) / <alpha-value>)",
+        "signal-mid": "rgb(var(--signal-mid) / <alpha-value>)",
+        "signal-deep": "rgb(var(--signal-deep) / <alpha-value>)",
+        complete: "rgb(var(--complete) / <alpha-value>)",
+        paused: "rgb(var(--paused) / <alpha-value>)",
+        danger: "rgb(var(--danger) / <alpha-value>)",
       },
       fontFamily: {
         display: ["Space Grotesk", "sans-serif"],
-        body: ["IBM Plex Sans", "sans-serif"],
+        body: ["Inter", "sans-serif"],
         mono: ["IBM Plex Mono", "monospace"],
       },
     },

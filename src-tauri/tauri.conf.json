@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
+  "productName": "Velox",
   "version": "0.1.0",
-  "identifier": "com.qabbas715.tauri-app",
+  "identifier": "com.qabbas715.velox",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "tauri-app",
+        "title": "Velox",
         "width": 800,
         "height": 600
       }

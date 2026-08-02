@@ -131,8 +131,7 @@ export function AddDownloadModal({
             <button
               onClick={handleProbe}
               disabled={!validUrl || probing}
-              className="flex items-center gap-1.5 shrink-0 bg-signal text-xs font-medium px-3 py-1.5 rounded-md hover:opacity-90 disabled:opacity-40 transition-opacity"
-              style={{ color: "#0B0D10" }}
+              className="btn-primary flex items-center gap-1.5 shrink-0 text-xs font-medium px-3 py-1.5 rounded-md transition-all"
             >
               {probing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
               Analyze
@@ -182,7 +181,7 @@ export function AddDownloadModal({
                     max={maxConnections}
                     value={connections}
                     onChange={(e) => setConnections(Number(e.target.value))}
-                    className="w-full accent-[#FF6B2C]"
+                    className="w-full accent-[#0DA3EE]"
                   />
                   <p className="text-[11px] text-dim">
                     File split into {effectiveConnections} byte-range requests, fetched in parallel.
@@ -229,8 +228,7 @@ export function AddDownloadModal({
           <button
             onClick={handleAdd}
             disabled={!probe}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-signal text-sm font-medium hover:opacity-90 disabled:opacity-40 transition-opacity"
-            style={{ color: "#0B0D10" }}
+            className="btn-primary flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition-all"
           >
             <Plus className="w-4 h-4" strokeWidth={2.5} />
             Add download
