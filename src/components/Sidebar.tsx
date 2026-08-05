@@ -91,6 +91,15 @@ export function Sidebar({
           {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           {theme === "dark" ? "Light theme" : "Dark theme"}
         </button>
+        <a
+          href="https://thedigiorb.com/"
+          target="_blank"
+          rel="noreferrer"
+          className="block text-center text-[10px] text-dim/70 hover:text-signal mt-3 pt-3 border-t border-line transition-colors"
+          title="TheDigiOrb"
+        >
+          Crafted by <span className="font-semibold">TheDigiOrb</span>
+        </a>
       </div>
     </aside>
   );
