@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -57,6 +60,13 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velox-${{ matrix.platform }}-installers
+          path: src-tauri/target/release/bundle/**/*.{msi,exe,dmg,app}
+          if-no-files-found: warn
 
   release-macos-universal:
     needs: build
