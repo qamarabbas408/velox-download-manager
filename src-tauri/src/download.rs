@@ -21,6 +21,7 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_SEGMENT_RETRIES: u32 = 12;
 const RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug)]
 struct SegmentError {
@@ -143,6 +144,37 @@ impl DownloadManager {
     }
 }
 
+fn root_cause(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut msg = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        msg = s.to_string();
+        src = s.source();
+    }
+    msg
+}
+
+fn describe_reqwest_error(url: &str, e: &reqwest::Error) -> String {
+    let cause = root_cause(e);
+    let c = cause.to_lowercase();
+    let friendly = if e.is_timeout() {
+        "timed out waiting for the server to respond".to_string()
+    } else if c.contains("dns") || c.contains("nodename") || c.contains("not known")
+        || c.contains("temporarily failed") || c.contains("cannot resolve")
+    {
+        "could not resolve the hostname (check your connection or the URL)".to_string()
+    } else if c.contains("refused") {
+        "connection refused by the server".to_string()
+    } else if c.contains("timed out") || c.contains("timedout") {
+        "connection timed out".to_string()
+    } else if c.contains("certificate") || c.contains("tls") {
+        "TLS/SSL handshake failed (the site may be misconfigured)".to_string()
+    } else {
+        cause
+    };
+    format!("Could not reach {url} — {friendly}")
+}
+
 async fn describe_http_status(resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.bytes().await.unwrap_or_default();
@@ -203,7 +235,11 @@ fn derive_filename(url: &str, content_disposition: Option<&str>) -> (String, Str
 }
 
 async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, String> {
-    let head = client.head(url).send().await;
+    let head = client
+        .head(url)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await;
 
     let mut size = None;
     let mut range_supported = false;
@@ -238,9 +274,10 @@ async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, 
         let resp = client
             .get(url)
             .header(RANGE, "bytes=0-0")
+            .timeout(PROBE_TIMEOUT)
             .send()
             .await
-            .map_err(|e| format!("Probe request failed: {e}"))?;
+            .map_err(|e| describe_reqwest_error(url, &e))?;
         if resp.status() == StatusCode::PARTIAL_CONTENT {
             range_supported = true;
             if let Some(cr) = resp
