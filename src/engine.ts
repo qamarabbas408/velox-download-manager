@@ -65,6 +65,12 @@ export interface HistoryRow {
   updatedAt: string;
 }
 
+export interface StorageStats {
+  totalBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+}
+
 export function probeUrl(url: string): Promise<ProbeResult> {
   return invoke("probe_url", { url });
 }
@@ -95,6 +101,10 @@ export function listDownloads(): Promise<ResumeSummary[]> {
 
 export function getHistory(): Promise<HistoryRow[]> {
   return invoke("get_history");
+}
+
+export function getStorageStats(downloadDir: string): Promise<StorageStats> {
+  return invoke("get_storage_stats", { path: downloadDir });
 }
 
 export function revealDownload(
