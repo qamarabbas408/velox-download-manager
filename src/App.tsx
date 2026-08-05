@@ -16,6 +16,7 @@ import {
   removeDownload,
   resumeDownload,
   revealDownload,
+  setMaxConnections,
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
 import { loadSettings, saveSettings } from "./store";
@@ -63,12 +64,18 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri) return;
-    loadSettings().then((s) => setSettings(s)).catch(() => {});
+    loadSettings().then((s) => {
+      setSettings(s);
+      setMaxConnections(s.maxConnections).catch(() => {});
+    }).catch(() => {});
   }, []);
 
   const handleSaveSettings = (next: AppSettings) => {
     setSettings(next);
-    if (isTauri) saveSettings(next);
+    if (isTauri) {
+      saveSettings(next);
+      setMaxConnections(next.maxConnections).catch(() => {});
+    }
   };
 
   useEffect(() => {
@@ -180,6 +187,10 @@ export default function App() {
 
   const activeDownloads = downloads.filter((d) => d.status === "downloading");
   const totalSpeed = activeDownloads.reduce((sum, d) => sum + d.speedBytesPerSec, 0);
+  const activeConnections = downloads.reduce(
+    (sum, d) => sum + d.segments.filter((s) => s.state === "active").length,
+    0
+  );
 
   const addDownload = (item: DownloadItem) => {
     setDownloads((prev) => [item, ...prev]);
@@ -208,7 +219,7 @@ export default function App() {
   };
 
   const handleRemove = (id: string) => {
-    if (isTauri) removeDownload(id);
+    if (isTauri) removeDownload(id).catch(() => {});
     setDownloads((prev) => prev.filter((d) => d.id !== id));
     refreshStorage(downloadDirRef.current);
   };
@@ -265,6 +276,7 @@ export default function App() {
       <AddDownloadModal
         open={isAddOpen}
         settings={settings}
+        activeConnections={activeConnections}
         onClose={() => setIsAddOpen(false)}
         onAdd={addDownload}
       />

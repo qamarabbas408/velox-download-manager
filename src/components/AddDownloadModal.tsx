@@ -38,11 +38,13 @@ function mockProbe(url: string): ProbeResult {
 export function AddDownloadModal({
   open,
   settings,
+  activeConnections,
   onClose,
   onAdd,
 }: {
   open: boolean;
   settings: AppSettings;
+  activeConnections: number;
   onClose: () => void;
   onAdd: (item: DownloadItem) => void;
 }) {
@@ -238,6 +240,9 @@ export function AddDownloadModal({
                   />
                   <p className="text-[11px] text-dim">
                     File split into {effectiveConnections} byte-range requests, fetched in parallel.
+                  </p>
+                  <p className="text-[11px] text-dim">
+                    {activeConnections} of {settings.maxConnections} global connections in use right now.
                   </p>
                 </div>
               )}

@@ -107,6 +107,10 @@ export function getStorageStats(downloadDir: string): Promise<StorageStats> {
   return invoke("get_storage_stats", { path: downloadDir });
 }
 
+export function setMaxConnections(max: number): Promise<void> {
+  return invoke("set_max_connections", { max });
+}
+
 export function revealDownload(
   downloadDir: string,
   name: string,
