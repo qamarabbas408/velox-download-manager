@@ -142,11 +142,21 @@ export default function App() {
     { id: "error", label: "Failed", count: countByStatus("error") },
   ];
 
-  const visibleDownloads = downloads.filter((d) => {
-    if (activeId !== "all" && d.status !== activeId) return false;
-    if (search && !`${d.name}.${d.extension}`.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
+  const statusOrder: Record<DownloadItem["status"], number> = {
+    downloading: 0,
+    queued: 1,
+    paused: 2,
+    error: 3,
+    completed: 4,
+  };
+
+  const visibleDownloads = downloads
+    .filter((d) => {
+      if (activeId !== "all" && d.status !== activeId) return false;
+      if (search && !`${d.name}.${d.extension}`.toLowerCase().includes(search.toLowerCase())) return false;
+      return true;
+    })
+    .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
 
   const activeDownloads = downloads.filter((d) => d.status === "downloading");
   const totalSpeed = activeDownloads.reduce((sum, d) => sum + d.speedBytesPerSec, 0);
