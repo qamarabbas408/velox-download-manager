@@ -1,22 +1,25 @@
 import { Settings, Sun, Moon } from "lucide-react";
 import type { SidebarSection } from "../types";
 import { useTheme } from "../theme";
+import { formatBytes } from "../utils/format";
 import logo from "../assets/logo.png";
 export function Sidebar({
   sections,
   activeId,
   onSelect,
   onOpenSettings,
+  storage,
 }: {
   sections: SidebarSection[];
   activeId: string;
   onSelect: (id: string) => void;
   onOpenSettings: () => void;
+  storage: { totalBytes: number; usedBytes: number } | null;
 }) {
   const { theme, toggleTheme } = useTheme();
-  const totalBytes = 2.1 * 1024 * 1024 * 1024 * 1024;
-  const usedBytes = 1.9 * 1024 * 1024 * 1024 * 1024;
-  const usedPercent = Math.round((usedBytes / totalBytes) * 100);
+  const usedPercent = storage
+    ? Math.round((storage.usedBytes / storage.totalBytes) * 100)
+    : 0;
 
   return (
     <aside className="w-64 shrink-0 h-full bg-surface border-r border-line flex flex-col">
@@ -64,7 +67,7 @@ export function Sidebar({
       <div className="px-5 py-4 border-t border-line">
         <div className="flex items-center justify-between text-xs text-dim mb-2">
           <span>Storage used</span>
-          <span className="font-mono">1.9 TB</span>
+          <span className="font-mono">{storage ? formatBytes(storage.usedBytes) : "—"}</span>
         </div>
         <div className="h-1.5 rounded-full bg-raised overflow-hidden">
           <div

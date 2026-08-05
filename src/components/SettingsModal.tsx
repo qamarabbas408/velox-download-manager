@@ -41,7 +41,7 @@ export function SettingsModal({
 
             <div>
               <div className="flex items-center justify-between text-xs mb-1.5">
-                <span className="text-muted">Max connections per download</span>
+                <span className="text-muted">Global connection limit</span>
                 <span className="font-mono text-ink">{draft.maxConnections}</span>
               </div>
               <input
@@ -52,6 +52,7 @@ export function SettingsModal({
                 onChange={(e) => setDraft({ ...draft, maxConnections: Number(e.target.value) })}
                 className="w-full accent-[#0DA3EE]"
               />
+              <p className="text-[11px] text-dim">Max concurrent connections across all running downloads.</p>
             </div>
 
             <div>
@@ -67,6 +68,7 @@ export function SettingsModal({
                 onChange={(e) => setDraft({ ...draft, defaultSegments: Number(e.target.value) })}
                 className="w-full accent-[#0DA3EE]"
               />
+              <p className="text-[11px] text-dim">How many pieces each new download uses by default.</p>
             </div>
           </div>
 

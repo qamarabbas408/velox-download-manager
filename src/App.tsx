@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { DownloadRow } from "./components/DownloadRow";
@@ -8,6 +8,7 @@ import { mockDownloads, mockSettings } from "./data/mockDownloads";
 import { formatSpeed } from "./utils/format";
 import {
   getHistory,
+  getStorageStats,
   isTauri,
   listDownloads,
   onDownloadProgress,
@@ -15,6 +16,7 @@ import {
   removeDownload,
   resumeDownload,
   revealDownload,
+  setMaxConnections,
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
 import { loadSettings, saveSettings } from "./store";
@@ -41,15 +43,39 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
+  const downloadDirRef = useRef(settings.downloadDir);
+
+  useEffect(() => {
+    downloadDirRef.current = settings.downloadDir;
+  }, [settings.downloadDir]);
+
+  const refreshStorage = useCallback((dir: string) => {
+    if (!isTauri) return;
+    getStorageStats(dir)
+      .then((s) => setStorage({ totalBytes: s.totalBytes, usedBytes: s.usedBytes }))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!isTauri) return;
-    loadSettings().then((s) => setSettings(s)).catch(() => {});
+    refreshStorage(settings.downloadDir);
+  }, [settings.downloadDir, refreshStorage]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    loadSettings().then((s) => {
+      setSettings(s);
+      setMaxConnections(s.maxConnections).catch(() => {});
+    }).catch(() => {});
   }, []);
 
   const handleSaveSettings = (next: AppSettings) => {
     setSettings(next);
-    if (isTauri) saveSettings(next);
+    if (isTauri) {
+      saveSettings(next);
+      setMaxConnections(next.maxConnections).catch(() => {});
+    }
   };
 
   useEffect(() => {
@@ -99,6 +125,7 @@ export default function App() {
       })
       .catch(() => {});
     onDownloadProgress((p) => {
+      if (p.status === "completed") refreshStorage(downloadDirRef.current);
       setDownloads((prev) => {
         const segments: SegmentInfo[] = p.segments.map((s) => ({
           index: s.index,
@@ -160,6 +187,10 @@ export default function App() {
 
   const activeDownloads = downloads.filter((d) => d.status === "downloading");
   const totalSpeed = activeDownloads.reduce((sum, d) => sum + d.speedBytesPerSec, 0);
+  const activeConnections = downloads.reduce(
+    (sum, d) => sum + d.segments.filter((s) => s.state === "active").length,
+    0
+  );
 
   const addDownload = (item: DownloadItem) => {
     setDownloads((prev) => [item, ...prev]);
@@ -188,8 +219,9 @@ export default function App() {
   };
 
   const handleRemove = (id: string) => {
-    if (isTauri) removeDownload(id);
+    if (isTauri) removeDownload(id).catch(() => {});
     setDownloads((prev) => prev.filter((d) => d.id !== id));
+    refreshStorage(downloadDirRef.current);
   };
 
   const handleReveal = (item: DownloadItem) => {
@@ -198,7 +230,13 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-full bg-base text-ink font-body overflow-hidden">
-      <Sidebar sections={sections} activeId={activeId} onSelect={setActiveId} onOpenSettings={() => setIsSettingsOpen(true)} />
+      <Sidebar
+        sections={sections}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        storage={isTauri ? storage : { totalBytes: 2.1 * 1024 * 1024 * 1024 * 1024, usedBytes: 1.9 * 1024 * 1024 * 1024 * 1024 }}
+      />
 
       <main className="flex-1 flex flex-col min-w-0">
         <Toolbar
@@ -238,6 +276,7 @@ export default function App() {
       <AddDownloadModal
         open={isAddOpen}
         settings={settings}
+        activeConnections={activeConnections}
         onClose={() => setIsAddOpen(false)}
         onAdd={addDownload}
       />

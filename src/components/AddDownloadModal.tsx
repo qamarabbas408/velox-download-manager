@@ -1,9 +1,19 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X, Loader2, Link2, ShieldCheck, ShieldAlert, Gauge, Plus, FolderOpen } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppSettings, DownloadItem, ProbeResult } from "../types";
 import { formatBytes } from "../utils/format";
 import { isTauri, probeUrl as engineProbe, startDownload } from "../engine";
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 function mockProbe(url: string): ProbeResult {
   const parsed = new URL(url);
@@ -28,11 +38,13 @@ function mockProbe(url: string): ProbeResult {
 export function AddDownloadModal({
   open,
   settings,
+  activeConnections,
   onClose,
   onAdd,
 }: {
   open: boolean;
   settings: AppSettings;
+  activeConnections: number;
   onClose: () => void;
   onAdd: (item: DownloadItem) => void;
 }) {
@@ -46,24 +58,16 @@ export function AddDownloadModal({
   const maxConnections = Math.min(settings.maxConnections, 32);
   const effectiveConnections = probe?.rangeSupported ? connections : 1;
 
-  const validUrl = useMemo(() => {
-    try {
-      const u = new URL(url);
-      return u.protocol === "http:" || u.protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, [url]);
+  const validUrl = useMemo(() => isHttpUrl(url), [url]);
 
-  if (!open) return null;
-
-  const handleProbe = async () => {
-    if (!validUrl) return;
+  const handleProbe = async (target?: string) => {
+    const targetUrl = target ?? url;
+    if (!isHttpUrl(targetUrl)) return;
     setProbing(true);
     setError(null);
     setProbe(null);
     try {
-      const result = isTauri ? await engineProbe(url) : await new Promise<ProbeResult>((res) => setTimeout(() => res(mockProbe(url)), 600));
+      const result = isTauri ? await engineProbe(targetUrl) : await new Promise<ProbeResult>((res) => setTimeout(() => res(mockProbe(targetUrl)), 600));
       setProbe(result);
     } catch (e) {
       setError(String(e));
@@ -71,6 +75,27 @@ export function AddDownloadModal({
       setProbing(false);
     }
   };
+
+  useEffect(() => {
+    if (!open || !isTauri || url !== "") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const text = (await readText()).trim();
+        if (cancelled || !text || !isHttpUrl(text)) return;
+        setUrl(text);
+        handleProbe(text);
+      } catch {
+        // clipboard empty or read failed — leave the field untouched
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (!open) return null;
 
   const handleBrowse = async () => {
     const dir = await openDialog({ directory: true, title: "Choose download folder", defaultPath: downloadDir });
@@ -155,7 +180,7 @@ export function AddDownloadModal({
               className="bg-transparent text-sm text-ink placeholder:text-dim outline-none w-full"
             />
             <button
-              onClick={handleProbe}
+              onClick={() => handleProbe()}
               disabled={!validUrl || probing}
               className="btn-primary flex items-center gap-1.5 shrink-0 text-xs font-medium px-3 py-1.5 rounded-md transition-all"
             >
@@ -215,6 +240,9 @@ export function AddDownloadModal({
                   />
                   <p className="text-[11px] text-dim">
                     File split into {effectiveConnections} byte-range requests, fetched in parallel.
+                  </p>
+                  <p className="text-[11px] text-dim">
+                    {activeConnections} of {settings.maxConnections} global connections in use right now.
                   </p>
                 </div>
               )}

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::history;
@@ -22,6 +22,7 @@ const MAX_SEGMENT_RETRIES: u32 = 12;
 const RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_MAX_CONN: usize = 32;
 
 #[derive(Debug)]
 struct SegmentError {
@@ -124,12 +125,15 @@ pub struct ActiveDownload {
     pub retries: Mutex<HashMap<usize, u32>>,
     pub speed: AtomicU64,
     pub last_state_flush: Mutex<Instant>,
+    pub conn_pool: Arc<Semaphore>,
 }
 
 pub struct DownloadManager {
     pub client: reqwest::Client,
     pub resume_dir: PathBuf,
     pub hist: Option<history::HistoryPool>,
+    pub conn_pool: Arc<Semaphore>,
+    pub max_conn: AtomicUsize,
     downloads: Mutex<HashMap<String, Arc<ActiveDownload>>>,
 }
 
@@ -139,6 +143,8 @@ impl DownloadManager {
             client: reqwest::Client::new(),
             resume_dir,
             hist,
+            conn_pool: Arc::new(Semaphore::new(DEFAULT_MAX_CONN)),
+            max_conn: AtomicUsize::new(DEFAULT_MAX_CONN),
             downloads: Mutex::new(HashMap::new()),
         }
     }
@@ -524,6 +530,14 @@ async fn run_segment(
     seg: SegmentState,
 ) -> (usize, Result<(), SegmentError>) {
     let index = seg.index;
+    // Reserve a slot in the global connection pool before sending anything,
+    // so total in-flight requests across all downloads never exceed the cap.
+    let _permit = match dl.conn_pool.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => {
+            return (index, Err(SegmentError::transient("connection pool closed".to_string())));
+        }
+    };
     let result = run_segment_inner(dl, client, seg).await;
     (index, result)
 }
@@ -784,6 +798,7 @@ pub async fn start_download(
 ) -> Result<(), String> {
     let file_path = PathBuf::from(&request.download_dir)
         .join(format!("{}.{}", request.name, request.extension));
+    let max_conn = manager.max_conn.load(Ordering::Relaxed).max(1);
 
     let dl = Arc::new(ActiveDownload {
         id: request.id.clone(),
@@ -791,7 +806,7 @@ pub async fn start_download(
         file_path,
         total_size: request.size_bytes,
         range_supported: request.range_supported,
-        segment_count: request.segments,
+        segment_count: request.segments.clamp(1, max_conn),
         status: Mutex::new(DownloadStatus::Queued),
         last_error: Mutex::new(None),
         pause_flag: AtomicBool::new(false),
@@ -800,6 +815,7 @@ pub async fn start_download(
         retries: Mutex::new(HashMap::new()),
         speed: AtomicU64::new(0),
         last_state_flush: Mutex::new(Instant::now()),
+        conn_pool: manager.conn_pool.clone(),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -933,6 +949,8 @@ pub async fn list_downloads(
         } else {
             0
         };
+        let max_conn = manager.max_conn.load(Ordering::Relaxed).max(1);
+        let segment_count = state.segment_count.clamp(1, max_conn);
 
         summaries.push(ResumeSummary {
             id: state.id.clone(),
@@ -943,7 +961,7 @@ pub async fn list_downloads(
             size_bytes: state.total_size,
             downloaded_bytes: downloaded,
             range_supported: state.range_supported,
-            segment_count: state.segment_count,
+            segment_count,
             progress_percent,
         });
 
@@ -959,7 +977,7 @@ pub async fn list_downloads(
             file_path,
             total_size: state.total_size,
             range_supported: state.range_supported,
-            segment_count: state.segment_count,
+            segment_count,
             status: Mutex::new(DownloadStatus::Queued),
             last_error: Mutex::new(None),
             pause_flag: AtomicBool::new(false),
@@ -968,6 +986,7 @@ pub async fn list_downloads(
             retries: Mutex::new(HashMap::new()),
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: manager.conn_pool.clone(),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             let id = dl.id.clone();
@@ -990,6 +1009,24 @@ pub async fn get_history(
         Some(pool) => history::fetch_history(pool, 500).await.map_err(|e| e.to_string()),
         None => Ok(Vec::new()),
     }
+}
+
+/// Resize the global connection pool at runtime (e.g. when the user saves a
+/// new "Max connections" value in Settings). Increasing adds permits;
+/// decreasing removes them as in-flight requests finish.
+#[tauri::command]
+pub async fn set_max_connections(
+    manager: State<'_, DownloadManager>,
+    max: usize,
+) -> Result<(), String> {
+    let max = max.clamp(1, 128);
+    let old = manager.max_conn.swap(max, Ordering::Relaxed);
+    if max > old {
+        manager.conn_pool.add_permits(max - old);
+    } else if max < old {
+        manager.conn_pool.forget_permits(old - max);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1132,6 +1169,7 @@ mod tests {
             retries: Mutex::new(HashMap::new()),
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(4)),
         });
 
         let client = reqwest::Client::new();
@@ -1143,5 +1181,67 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
         h.abort();
+    }
+
+    /// The global connection pool must cap the number of segments that are
+    /// in flight at once, even when the download asks for more connections.
+    #[tokio::test]
+    async fn connection_pool_limits_concurrency() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let data = DATA.to_vec();
+        let concurrent = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let c_inner = concurrent.clone();
+        let p_inner = peak.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                let data = data.clone();
+                let c = c_inner.clone();
+                let p = p_inner.clone();
+                tokio::spawn(async move {
+                    let now = c.fetch_add(1, Ordering::Relaxed) + 1;
+                    p.fetch_max(now, Ordering::Relaxed);
+                    serve_one(stream, &data).await;
+                    c.fetch_sub(1, Ordering::Relaxed);
+                });
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let dir = std::env::temp_dir().join(format!("velox-pool-test-{}", std::process::id()));
+        let file_path = dir.join("result.bin");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Pool capped at 2, but the download requests 8 segments.
+        let dl = Arc::new(ActiveDownload {
+            id: "pool".to_string(),
+            url: format!("{base}/file.bin"),
+            file_path: file_path.clone(),
+            total_size: DATA.len() as u64,
+            range_supported: true,
+            segment_count: 8,
+            status: Mutex::new(DownloadStatus::Queued),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            segments: Mutex::new(Vec::new()),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(2)),
+        });
+
+        let client = reqwest::Client::new();
+        run_download_inner(None, dl.clone(), client, &dir, None).await;
+
+        assert_eq!(*dl.status.lock().await, DownloadStatus::Completed);
+        assert!(peak.load(Ordering::Relaxed) <= 2, "peak concurrency was {}", peak.load(Ordering::Relaxed));
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        handle.abort();
     }
 }
