@@ -53,12 +53,14 @@ function RowActions({
   onPause,
   onResume,
   onRetry,
+  onReveal,
   onRemove,
 }: {
   status: DownloadStatus;
   onPause: () => void;
   onResume: () => void;
   onRetry: () => void;
+  onReveal: () => void;
   onRemove: () => void;
 }) {
   const btn = "p-1.5 rounded-md text-muted hover:text-ink hover:bg-raised transition-colors";
@@ -80,7 +82,7 @@ function RowActions({
         </button>
       )}
       {status === "completed" && (
-        <button className={btn} aria-label="Show in folder" onClick={onRetry}>
+        <button className={btn} aria-label="Show in folder" onClick={onReveal}>
           <FolderOpen className="w-4 h-4" />
         </button>
       )}
@@ -142,12 +144,14 @@ export function DownloadRow({
   onPause,
   onResume,
   onRetry,
+  onReveal,
   onRemove,
 }: {
   item: DownloadItem;
   onPause: () => void;
   onResume: () => void;
   onRetry: () => void;
+  onReveal: () => void;
   onRemove: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -210,6 +214,7 @@ export function DownloadRow({
           onPause={onPause}
           onResume={onResume}
           onRetry={onRetry}
+          onReveal={onReveal}
           onRemove={onRemove}
         />
       </div>

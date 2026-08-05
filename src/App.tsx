@@ -14,6 +14,7 @@ import {
   pauseDownload,
   removeDownload,
   resumeDownload,
+  revealDownload,
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
 import { loadSettings, saveSettings } from "./store";
@@ -181,6 +182,10 @@ export default function App() {
     setDownloads((prev) => prev.filter((d) => d.id !== id));
   };
 
+  const handleReveal = (item: DownloadItem) => {
+    if (isTauri) revealDownload(item.downloadDir, item.name, item.extension).catch(() => {});
+  };
+
   return (
     <div className="flex h-screen w-full bg-base text-ink font-body overflow-hidden">
       <Sidebar sections={sections} activeId={activeId} onSelect={setActiveId} onOpenSettings={() => setIsSettingsOpen(true)} />
@@ -212,6 +217,7 @@ export default function App() {
                 onPause={() => handlePause(item.id)}
                 onResume={() => handleResume(item.id)}
                 onRetry={() => handleResume(item.id)}
+                onReveal={() => handleReveal(item)}
                 onRemove={() => handleRemove(item.id)}
               />
             ))

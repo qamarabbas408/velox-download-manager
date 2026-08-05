@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { ProbeResult } from "./types";
 
 export const isTauri =
@@ -94,6 +95,17 @@ export function listDownloads(): Promise<ResumeSummary[]> {
 
 export function getHistory(): Promise<HistoryRow[]> {
   return invoke("get_history");
+}
+
+export function revealDownload(
+  downloadDir: string,
+  name: string,
+  extension: string
+): Promise<void> {
+  const path = downloadDir.endsWith("/") || downloadDir.endsWith("\\")
+    ? `${downloadDir}${name}.${extension}`
+    : `${downloadDir}/${name}.${extension}`;
+  return revealItemInDir(path);
 }
 
 export function onDownloadProgress(
