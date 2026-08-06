@@ -38,28 +38,61 @@ export function Sidebar({
       <nav className="flex-1 px-3 py-4 space-y-0.5">
         {sections.map((section) => {
           const isActive = section.id === activeId;
+          const isAllActive = section.id === "all" || activeId.startsWith("cat:");
+          const showChildren = section.children && isAllActive;
           return (
-            <button
-              key={section.id}
-              onClick={() => onSelect(section.id)}
-              className={[
-                "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors",
-                isActive
-                  ? "bg-raised text-ink"
-                  : "text-muted hover:text-ink hover:bg-raised/60",
-              ].join(" ")}
-            >
-              <span className="flex items-center gap-2.5">
-                <span
-                  className={[
-                    "w-1.5 h-1.5 rounded-full transition-colors",
-                    isActive ? "bg-signal shadow-[0_0_6px_rgba(13,163,238,0.9)]" : "bg-dim",
-                  ].join(" ")}
-                />
-                {section.label}
-              </span>
-              <span className="font-mono text-xs text-dim">{section.count}</span>
-            </button>
+            <div key={section.id}>
+              <button
+                onClick={() => onSelect(section.id)}
+                className={[
+                  "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors",
+                  isActive
+                    ? "bg-raised text-ink"
+                    : "text-muted hover:text-ink hover:bg-raised/60",
+                ].join(" ")}
+              >
+                <span className="flex items-center gap-2.5">
+                  <span
+                    className={[
+                      "w-1.5 h-1.5 rounded-full transition-colors",
+                      isActive ? "bg-signal shadow-[0_0_6px_rgba(13,163,238,0.9)]" : "bg-dim",
+                    ].join(" ")}
+                  />
+                  {section.label}
+                </span>
+                <span className="font-mono text-xs text-dim">{section.count}</span>
+              </button>
+              {showChildren && (
+                <div className="mt-0.5 ml-4 space-y-0.5 border-l border-line pl-2">
+                  {section.children!.map((child) => {
+                    const isChildActive = child.id === activeId;
+                    return (
+                      <button
+                        key={child.id}
+                        onClick={() => onSelect(child.id)}
+                        className={[
+                          "w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-[13px] transition-colors",
+                          isChildActive
+                            ? "bg-raised text-ink"
+                            : "text-dim hover:text-ink hover:bg-raised/60",
+                        ].join(" ")}
+                      >
+                        <span className="flex items-center gap-2">
+                          <span
+                            className={[
+                              "w-1 h-1 rounded-full transition-colors",
+                              isChildActive ? "bg-signal" : "bg-dim/70",
+                            ].join(" ")}
+                          />
+                          {child.label}
+                        </span>
+                        <span className="font-mono text-xs text-dim">{child.count}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </nav>

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { X, Loader2, Link2, ShieldCheck, ShieldAlert, Gauge, Plus, FolderOpen } from "lucide-react";
+import { X, Loader2, Link2, ShieldCheck, ShieldAlert, Plus, FolderOpen } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppSettings, DownloadItem, ProbeResult } from "../types";
 import { formatBytes } from "../utils/format";
 import { isTauri, probeUrl as engineProbe, startDownload } from "../engine";
+import { FileTypeIcon } from "./FileTypeIcon";
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -84,7 +85,6 @@ export function AddDownloadModal({
         const text = (await readText()).trim();
         if (cancelled || !text || !isHttpUrl(text)) return;
         setUrl(text);
-        handleProbe(text);
       } catch {
         // clipboard empty or read failed — leave the field untouched
       }
@@ -177,7 +177,7 @@ export function AddDownloadModal({
                 setError(null);
               }}
               placeholder="https://example.com/file.zip"
-              className="bg-transparent text-sm text-ink placeholder:text-dim outline-none w-full"
+              className="bg-transparent text-sm text-ink placeholder:text-dim outline-none w-full min-w-0"
             />
             <button
               onClick={() => handleProbe()}
@@ -198,13 +198,13 @@ export function AddDownloadModal({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-9 h-9 rounded-lg bg-raised flex items-center justify-center text-muted shrink-0">
-                    <Gauge className="w-5 h-5" />
+                    <FileTypeIcon extension={probe.extension} className="w-5 h-5" />
                   </div>
                   <div className="min-w-0">
                     <p className="text-sm text-ink truncate">
                       {probe.name}<span className="text-dim">.{probe.extension}</span>
                     </p>
-                    <p className="font-mono text-[11px] text-dim">{probe.url}</p>
+                    <p className="font-mono text-[11px] text-dim truncate">{probe.url}</p>
                   </div>
                 </div>
                 <span className="font-mono text-xs text-muted shrink-0">{formatBytes(probe.sizeBytes)}</span>

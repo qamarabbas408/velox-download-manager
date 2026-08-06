@@ -35,6 +35,7 @@ export interface SidebarSection {
   id: string;
   label: string;
   count: number;
+  children?: SidebarSection[];
 }
 
 export interface ProbeResult {

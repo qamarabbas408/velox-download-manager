@@ -20,6 +20,7 @@ import {
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
 import { loadSettings, saveSettings } from "./store";
+import { CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_PREFIX, categoryFor } from "./categories";
 
 function toStatus(status: string): DownloadItem["status"] {
   switch (status) {
@@ -132,7 +133,7 @@ export default function App() {
       .catch(() => {});
     onDownloadProgress((p) => {
       if (p.status === "completed") refreshStorage(downloadDirRef.current);
-      if (p.status === "error" && ["all", "downloading", "error"].includes(activeIdRef.current)) {
+      if (p.status === "error" && ["all", "in-progress", "error"].includes(activeIdRef.current)) {
         setActiveId("error");
       }
       setDownloads((prev) => {
@@ -167,7 +168,7 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-    const countByStatus = (status: string) =>
+  const countByStatus = (status: string) =>
     downloads.filter((d) => d.status === status).length;
 
   const handleSelectTab = (id: string) => {
@@ -175,10 +176,18 @@ export default function App() {
     setActiveId(id);
   };
 
+  const inProgressCount =
+    countByStatus("downloading") + countByStatus("queued") + countByStatus("paused");
+
+  const categorySections: SidebarSection[] = CATEGORY_ORDER.map((category) => ({
+    id: `${CATEGORY_PREFIX}${category}`,
+    label: CATEGORY_LABELS[category],
+    count: downloads.filter((d) => categoryFor(d.extension) === category).length,
+  }));
+
   const sections: SidebarSection[] = [
-    { id: "all", label: "All downloads", count: downloads.length },
-    { id: "downloading", label: "Downloading", count: countByStatus("downloading") },
-    { id: "paused", label: "Paused", count: countByStatus("paused") },
+    { id: "all", label: "All downloads", count: downloads.length, children: categorySections },
+    { id: "in-progress", label: "In progress", count: inProgressCount },
     { id: "completed", label: "Completed", count: countByStatus("completed") },
     { id: "error", label: "Failed", count: countByStatus("error") },
   ];
@@ -193,7 +202,14 @@ export default function App() {
 
   const visibleDownloads = downloads
     .filter((d) => {
-      if (activeId !== "all" && d.status !== activeId) return false;
+      if (activeId.startsWith(CATEGORY_PREFIX)) {
+        const category = activeId.slice(CATEGORY_PREFIX.length);
+        if (categoryFor(d.extension) !== category) return false;
+      } else if (activeId === "in-progress") {
+        if (!["downloading", "queued", "paused"].includes(d.status)) return false;
+      } else if (activeId !== "all" && d.status !== activeId) {
+        return false;
+      }
       if (search && !`${d.name}.${d.extension}`.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     })
@@ -208,7 +224,7 @@ export default function App() {
 
   const addDownload = (item: DownloadItem) => {
     setDownloads((prev) => [item, ...prev]);
-    setActiveId("downloading");
+    setActiveId("in-progress");
     setIsAddOpen(false);
   };
 
@@ -230,7 +246,7 @@ export default function App() {
   const handleResume = (id: string) => {
     if (isTauri) resumeDownload(id).catch(() => {});
     updateStatus(id, "downloading");
-    setActiveId("downloading");
+    setActiveId("in-progress");
   };
 
   const handleRemove = (id: string) => {
