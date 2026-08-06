@@ -78,6 +78,16 @@ export function AddDownloadModal({
   };
 
   useEffect(() => {
+    if (open) return;
+    setUrl("");
+    setProbe(null);
+    setError(null);
+    setConnections(settings.defaultSegments);
+    setDownloadDir(settings.downloadDir);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
     if (!open || !isTauri || url !== "") return;
     let cancelled = false;
     (async () => {

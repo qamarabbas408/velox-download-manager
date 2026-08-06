@@ -1,8 +1,39 @@
-import { Settings, Sun, Moon } from "lucide-react";
+import { useState } from "react";
+import {
+  Settings,
+  Sun,
+  Moon,
+  ChevronDown,
+  ChevronRight,
+  HardDrive,
+  ArrowDown,
+  CheckCheck,
+  AlertTriangle,
+  Music,
+  FileArchive,
+  Video,
+  MonitorDown,
+  FileText,
+  Smartphone,
+  Image as ImageIcon,
+} from "lucide-react";
 import type { SidebarSection } from "../types";
 import { useTheme } from "../theme";
 import { formatBytes } from "../utils/format";
 import logo from "../assets/logo.png";
+
+const CATEGORY_ICONS: Record<string, React.ElementType> = {
+  music: Music,
+  video: Video,
+  compressed: FileArchive,
+  programs: MonitorDown,
+  apk: Smartphone,
+  ipa: Smartphone,
+  images: ImageIcon,
+  documents: FileText,
+  other: FileText,
+};
+
 export function Sidebar({
   sections,
   activeId,
@@ -17,13 +48,18 @@ export function Sidebar({
   storage: { totalBytes: number; usedBytes: number } | null;
 }) {
   const { theme, toggleTheme } = useTheme();
+  const [libraryOpen, setLibraryOpen] = useState(true);
+
+  const allSection = sections.find((s) => s.id === "all");
   const usedPercent = storage
     ? Math.round((storage.usedBytes / storage.totalBytes) * 100)
     : 0;
 
+  const statusSections = sections.filter((s) => s.id !== "all");
+
   return (
-    <aside className="w-64 shrink-0 h-full bg-surface border-r border-line flex flex-col">
-      <div className="flex items-center gap-2.5 px-5 h-16 border-b border-line">
+    <aside className="w-64 shrink-0 h-full bg-surface border-r border-line flex flex-col px-3 py-4 gap-1">
+      <div className="flex items-center gap-2.5 px-2 pb-3 border-b border-line">
         <img src={logo} alt="Velox" className="w-8 h-8 rounded-md object-contain" />
         <div className="leading-none">
           <span className="block font-display font-bold text-lg brand-gradient-text tracking-tight">
@@ -35,104 +71,139 @@ export function Sidebar({
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-4 space-y-0.5">
-        {sections.map((section) => {
-          const isActive = section.id === activeId;
-          const isAllActive = section.id === "all" || activeId.startsWith("cat:");
-          const showChildren = section.children && isAllActive;
-          return (
-            <div key={section.id}>
-              <button
-                onClick={() => onSelect(section.id)}
-                className={[
-                  "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors",
-                  isActive
-                    ? "bg-raised text-ink"
-                    : "text-muted hover:text-ink hover:bg-raised/60",
-                ].join(" ")}
-              >
-                <span className="flex items-center gap-2.5">
-                  <span
-                    className={[
-                      "w-1.5 h-1.5 rounded-full transition-colors",
-                      isActive ? "bg-signal shadow-[0_0_6px_rgba(13,163,238,0.9)]" : "bg-dim",
-                    ].join(" ")}
-                  />
-                  {section.label}
-                </span>
-                <span className="font-mono text-xs text-dim">{section.count}</span>
-              </button>
-              {showChildren && (
-                <div className="mt-0.5 ml-4 space-y-0.5 border-l border-line pl-2">
-                  {section.children!.map((child) => {
-                    const isChildActive = child.id === activeId;
-                    return (
-                      <button
-                        key={child.id}
-                        onClick={() => onSelect(child.id)}
-                        className={[
-                          "w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-[13px] transition-colors",
-                          isChildActive
-                            ? "bg-raised text-ink"
-                            : "text-dim hover:text-ink hover:bg-raised/60",
-                        ].join(" ")}
-                      >
-                        <span className="flex items-center gap-2">
-                          <span
-                            className={[
-                              "w-1 h-1 rounded-full transition-colors",
-                              isChildActive ? "bg-signal" : "bg-dim/70",
-                            ].join(" ")}
-                          />
-                          {child.label}
-                        </span>
-                        <span className="font-mono text-xs text-dim">{child.count}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+      {allSection && (
+        <>
+          <button
+            onClick={() => {
+              setLibraryOpen((v) => !v);
+              onSelect("all");
+            }}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-raised text-ink text-sm mt-3"
+          >
+            <span className="flex items-center gap-2.5">
+              <HardDrive className="w-4 h-4" />
+              All Downloads
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="font-mono text-xs text-dim">{allSection.count}</span>
+              {libraryOpen ? (
+                <ChevronDown className="w-4 h-4 text-dim" />
+              ) : (
+                <ChevronRight className="w-4 h-4 text-dim" />
               )}
-            </div>
-          );
-        })}
-      </nav>
+            </span>
+          </button>
 
-      <div className="px-5 py-4 border-t border-line">
-        <div className="flex items-center justify-between text-xs text-dim mb-2">
-          <span>Storage used</span>
-          <span className="font-mono">{storage ? formatBytes(storage.usedBytes) : "—"}</span>
+          {libraryOpen &&
+            allSection.children?.map((child) => {
+              const isActive = child.id === activeId;
+              const Icon = CATEGORY_ICONS[child.id.replace("cat:", "")] ?? FileText;
+              return (
+                <button
+                  key={child.id}
+                  onClick={() => onSelect(child.id)}
+                  className={[
+                    "w-full flex items-center gap-2.5 pl-8 pr-3 py-2 rounded-lg text-sm transition-colors",
+                    isActive
+                      ? "bg-raised text-ink"
+                      : "text-muted hover:text-ink hover:bg-raised/60",
+                  ].join(" ")}
+                >
+                  <Icon className="w-4 h-4" />
+                  <span className="flex-1 text-left">{child.label}</span>
+                  <span className="font-mono text-xs text-dim">{child.count}</span>
+                </button>
+              );
+            })}
+        </>
+      )}
+
+      <div className="border-t border-line my-2" />
+
+      {statusSections.map((section) => {
+        const isActive = section.id === activeId;
+        const Icon =
+          section.id === "in-progress"
+            ? ArrowDown
+            : section.id === "error"
+              ? AlertTriangle
+              : CheckCheck;
+        return (
+          <button
+            key={section.id}
+            onClick={() => onSelect(section.id)}
+            className={[
+              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
+              isActive
+                ? "bg-raised text-ink"
+                : "text-muted hover:text-ink hover:bg-raised/60",
+            ].join(" ")}
+          >
+            <Icon className="w-4 h-4" />
+            <span className="flex-1 text-left">{section.label}</span>
+            <span className="font-mono text-xs text-dim">{section.count}</span>
+          </button>
+        );
+      })}
+
+      <div className="mt-auto pt-4 space-y-2">
+        <div className="rounded-2xl bg-raised/40 border border-line p-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm text-muted flex items-center gap-2">
+              <HardDrive className="w-4 h-4" /> Disk Space
+            </span>
+          </div>
+
+          <div className="relative mx-auto w-[150px] h-[80px]">
+            <svg viewBox="0 0 150 80" className="w-full h-full overflow-visible">
+              <defs>
+                <linearGradient id="gaugeGradient" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stopColor="rgb(var(--signal))" />
+                  <stop offset="100%" stopColor="rgb(var(--signal-deep))" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M 21 75 A 54 54 0 0 1 129 75"
+                fill="none"
+                stroke="rgb(var(--raised))"
+                strokeWidth="10"
+                strokeLinecap="round"
+              />
+              <path
+                d="M 21 75 A 54 54 0 0 1 129 75"
+                fill="none"
+                stroke="url(#gaugeGradient)"
+                strokeWidth="10"
+                strokeLinecap="round"
+                strokeDasharray={`${(usedPercent / 100) * Math.PI * 54} ${Math.PI * 54}`}
+              />
+            </svg>
+            <span className="absolute left-0 bottom-0 text-[10px] text-dim">0%</span>
+            <span className="absolute right-0 bottom-0 text-[10px] text-dim">100%</span>
+          </div>
+
+          <p className="text-center text-2xl font-semibold text-ink mt-1">{usedPercent}%</p>
+          <p className="text-center text-xs text-dim mb-1 truncate">
+            {storage ? formatBytes(storage.usedBytes) : "—"} used
+          </p>
         </div>
-        <div className="h-1.5 rounded-full bg-raised overflow-hidden">
-          <div
-            className="h-full rounded-full brand-bar"
-            style={{ width: `${usedPercent}%` }}
-          />
-        </div>
+
         <button
           onClick={onOpenSettings}
-          className="w-full flex items-center gap-2 mt-4 text-sm text-muted hover:text-ink"
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted hover:text-ink hover:bg-raised/60 transition-colors"
         >
           <Settings className="w-4 h-4" />
-          Settings
+          Options
         </button>
         <button
           onClick={toggleTheme}
           aria-label="Toggle theme"
           title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-          className="w-full flex items-center gap-2 mt-1 text-sm text-muted hover:text-ink"
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted hover:text-ink hover:bg-raised/60 transition-colors"
         >
           {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           {theme === "dark" ? "Light theme" : "Dark theme"}
         </button>
-        <a
-          href="https://thedigiorb.com/"
-          target="_blank"
-          rel="noreferrer"
-          className="block text-center text-[10px] text-dim/70 hover:text-signal mt-3 pt-3 border-t border-line transition-colors"
-          title="TheDigiOrb"
-        >
-          Crafted by <span className="font-semibold">TheDigiOrb</span>
-        </a>
       </div>
     </aside>
   );

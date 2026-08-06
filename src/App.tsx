@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
-import { DownloadRow } from "./components/DownloadRow";
+import { DownloadsTable } from "./components/DownloadsTable";
+import { BottomBar } from "./components/BottomBar";
+import { EmptyState } from "./components/EmptyState";
 import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { mockDownloads, mockSettings } from "./data/mockDownloads";
@@ -45,6 +47,7 @@ export default function App() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
@@ -259,6 +262,51 @@ export default function App() {
     if (isTauri) revealDownload(item.downloadDir, item.name, item.extension).catch(() => {});
   };
 
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) =>
+      prev.size === visibleDownloads.length ? new Set() : new Set(visibleDownloads.map((d) => d.id))
+    );
+  };
+
+  const selectedStatuses = Array.from(
+    new Set(visibleDownloads.filter((d) => selectedIds.has(d.id)).map((d) => d.status))
+  );
+
+  const handleResumeSelected = () => {
+    visibleDownloads.filter((d) => selectedIds.has(d.id)).forEach((d) => handleResume(d.id));
+  };
+
+  const handlePauseSelected = () => {
+    visibleDownloads.filter((d) => selectedIds.has(d.id)).forEach((d) => handlePause(d.id));
+  };
+
+  const handleStopAll = () => {
+    downloads.filter((d) => d.status === "downloading").forEach((d) => handlePause(d.id));
+  };
+
+  const handleDeleteSelected = () => {
+    visibleDownloads.filter((d) => selectedIds.has(d.id)).forEach((d) => handleRemove(d.id));
+    setSelectedIds(new Set());
+  };
+
+  const handleRemoveWithDeselect = (id: string) => {
+    handleRemove(id);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
   return (
     <div className="flex h-screen w-full bg-base text-ink font-body overflow-hidden">
       <Sidebar
@@ -276,32 +324,44 @@ export default function App() {
           search={search}
           onSearch={setSearch}
           onAdd={() => setIsAddOpen(true)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          hasSelection={selectedIds.size > 0}
+          selectedStatuses={selectedStatuses}
+          onResumeSelected={handleResumeSelected}
+          onPauseSelected={handlePauseSelected}
+          onDeleteSelected={handleDeleteSelected}
+          onStopAll={handleStopAll}
+          hasActive={activeDownloads.length > 0}
         />
 
         <div className="flex-1 overflow-y-auto">
           {visibleDownloads.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-muted gap-2">
-              <p className="text-sm">No downloads yet</p>
-              {isTauri && (
-                <p className="text-xs text-dim">
-                  Paste a URL and hit “Add download” to start a real segmented download.
-                </p>
-              )}
-            </div>
+            <EmptyState
+              variant={downloads.length === 0 ? "empty" : "no-results"}
+              isTauri={isTauri}
+            />
           ) : (
-            visibleDownloads.map((item) => (
-              <DownloadRow
-                key={item.id}
-                item={item}
-                onPause={() => handlePause(item.id)}
-                onResume={() => handleResume(item.id)}
-                onRetry={() => handleResume(item.id)}
-                onReveal={() => handleReveal(item)}
-                onRemove={() => handleRemove(item.id)}
-              />
-            ))
+            <DownloadsTable
+              items={visibleDownloads}
+              selectedIds={selectedIds}
+              onToggleSelect={toggleSelect}
+              onPause={handlePause}
+              onResume={handleResume}
+              onRetry={handleResume}
+              onReveal={handleReveal}
+              onRemove={handleRemoveWithDeselect}
+            />
           )}
         </div>
+
+        <BottomBar
+          visibleCount={visibleDownloads.length}
+          totalCount={downloads.length}
+          selectedCount={selectedIds.size}
+          allSelected={selectedIds.size > 0 && selectedIds.size === visibleDownloads.length}
+          onToggleSelectAll={toggleSelectAll}
+          totalSpeedLabel={formatSpeed(totalSpeed)}
+        />
       </main>
 
       <AddDownloadModal

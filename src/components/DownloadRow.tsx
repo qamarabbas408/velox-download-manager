@@ -25,14 +25,6 @@ const statusLabel: Record<DownloadStatus, string> = {
   error: "Failed",
 };
 
-const statusPillClass: Record<DownloadStatus, string> = {
-  downloading: "bg-signal/15 text-signal",
-  paused: "bg-paused/15 text-paused",
-  completed: "bg-complete/15 text-complete",
-  queued: "bg-dim/20 text-muted",
-  error: "bg-danger/15 text-danger",
-};
-
 function RowActions({
   status,
   onPause,
@@ -50,7 +42,7 @@ function RowActions({
 }) {
   const btn = "p-1.5 rounded-md text-muted hover:text-ink hover:bg-raised transition-colors";
   return (
-    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+    <div className="flex items-center gap-1">
       {status === "downloading" && (
         <button className={btn} aria-label="Pause download" onClick={onPause}>
           <Pause className="w-4 h-4" />
@@ -157,9 +149,6 @@ export function DownloadRow({
               {item.name}
               <span className="text-dim">.{item.extension}</span>
             </p>
-            <span className={`shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full ${statusPillClass[item.status]}`}>
-              {statusLabel[item.status]}
-            </span>
             {item.rangeSupported && (
               <span className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-raised text-dim" title="Server supports byte ranges">
                 segmented
@@ -194,14 +183,19 @@ export function DownloadRow({
           )}
         </div>
 
-        <RowActions
-          status={item.status}
-          onPause={onPause}
-          onResume={onResume}
-          onRetry={onRetry}
-          onReveal={onReveal}
-          onRemove={onRemove}
-        />
+        <div className="flex flex-col items-end gap-1.5 shrink-0">
+          <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${item.status === "downloading" ? "bg-signal/15 text-signal" : item.status === "paused" ? "bg-paused/15 text-paused" : item.status === "completed" ? "bg-complete/15 text-complete" : item.status === "error" ? "bg-danger/15 text-danger" : "bg-dim/20 text-muted"}`}>
+            {statusLabel[item.status]}
+          </span>
+          <RowActions
+            status={item.status}
+            onPause={onPause}
+            onResume={onResume}
+            onRetry={onRetry}
+            onReveal={onReveal}
+            onRemove={onRemove}
+          />
+        </div>
       </div>
 
       <button
