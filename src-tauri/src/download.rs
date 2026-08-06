@@ -690,6 +690,9 @@ async fn run_download_inner(
 
         tokio::select! {
             _ = tokio::time::sleep(PROGRESS_INTERVAL) => {
+                if dl.cancel_flag.load(Ordering::Relaxed) {
+                    break;
+                }
                 let (downloaded, done) = aggregate(&dl).await;
                 let now = Instant::now();
                 let dt = now.duration_since(last_time).as_secs_f64();
@@ -787,6 +790,9 @@ async fn run_download_inner(
     }
 
     join.abort_all();
+    if dl.cancel_flag.load(Ordering::Relaxed) {
+        return;
+    }
     *dl.status.lock().await = DownloadStatus::Error;
     if let Some(app) = app {
         emit_progress(app, &dl, aggregate(&dl).await.0).await;
