@@ -1144,6 +1144,24 @@ mod tests {
         assert_eq!(ext, "bin");
     }
 
+    #[test]
+    fn derive_filename_keeps_simple_content_disposition() {
+        let url = "https://ash-speed.hetzner.com/100MB.bin";
+        let cd = Some("attachment; filename=\"100MB.bin\"");
+        let (name, ext) = derive_filename(url, cd);
+        assert_eq!(name, "100MB");
+        assert_eq!(ext, "bin");
+    }
+
+    #[test]
+    fn derive_filename_handles_windows_path_in_content_disposition() {
+        let url = "https://host.com/download";
+        let cd = Some("attachment; filename=\"C:\\Users\\bob\\archive.zip\"");
+        let (name, ext) = derive_filename(url, cd);
+        assert_eq!(name, "archive");
+        assert_eq!(ext, "zip");
+    }
+
     #[tokio::test]
     async fn probe_detects_range_support_and_size() {
         let (base, _h) = spawn_server().await;
