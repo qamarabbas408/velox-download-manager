@@ -216,11 +216,19 @@ fn derive_filename(url: &str, content_disposition: Option<&str>) -> (String, Str
                 .next()
                 .unwrap_or("");
             if !trimmed.is_empty() {
-                let dot = trimmed.rfind('.');
-                if let Some(d) = dot {
-                    return (trimmed[..d].to_string(), trimmed[d + 1..].to_string());
+                let basename = trimmed
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches('-');
+                if !basename.is_empty() {
+                    let dot = basename.rfind('.');
+                    if let Some(d) = dot {
+                        return (basename[..d].to_string(), basename[d + 1..].to_string());
+                    }
+                    return (basename.to_string(), "bin".to_string());
                 }
-                return (trimmed.to_string(), "bin".to_string());
             }
         }
     }
@@ -1117,6 +1125,23 @@ mod tests {
             }
         });
         (format!("http://{addr}"), handle)
+    }
+
+    #[test]
+    fn derive_filename_strips_path_from_content_disposition() {
+        let url = "https://178-63-138-106.top/Oceanofgames.com/Sudden_Strike_5_Deluxe_Edition_v1_06_29427.zip?md5=abc&expires=123";
+        let cd = Some("attachment; filename=\"/Oceanofgames.com/Sudden_Strike_5_Deluxe_Edition_v1_06_29427.zip\"");
+        let (name, ext) = derive_filename(url, cd);
+        assert_eq!(name, "Sudden_Strike_5_Deluxe_Edition_v1_06_29427");
+        assert_eq!(ext, "zip");
+    }
+
+    #[test]
+    fn derive_filename_falls_back_to_url_basename() {
+        let url = "https://host.com/path/file.bin?token=x";
+        let (name, ext) = derive_filename(url, None);
+        assert_eq!(name, "file");
+        assert_eq!(ext, "bin");
     }
 
     #[tokio::test]
