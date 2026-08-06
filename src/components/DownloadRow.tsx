@@ -5,10 +5,6 @@ import {
   X,
   RotateCw,
   FolderOpen,
-  FileArchive,
-  FileVideo,
-  FileCog,
-  File as FileIcon,
   ChevronDown,
   ChevronRight,
   Check,
@@ -19,6 +15,7 @@ import {
 import type { DownloadItem, DownloadStatus, SegmentInfo } from "../types";
 import { SegmentedProgressBar } from "./SegmentedProgressBar";
 import { formatBytes, formatEta, formatSpeed, progressPercent } from "../utils/format";
+import { FileTypeIcon } from "./FileTypeIcon";
 
 const statusLabel: Record<DownloadStatus, string> = {
   downloading: "Downloading",
@@ -35,18 +32,6 @@ const statusPillClass: Record<DownloadStatus, string> = {
   queued: "bg-dim/20 text-muted",
   error: "bg-danger/15 text-danger",
 };
-
-function iconForExtension(extension: string) {
-  const archive = ["zip", "rar", "tar.xz", "sql.gz"];
-  const video = ["mp4", "mkv"];
-  const system = ["msi", "pkg", "exe"];
-
-  const cls = "w-5 h-5";
-  if (archive.includes(extension)) return <FileArchive className={cls} />;
-  if (video.includes(extension)) return <FileVideo className={cls} />;
-  if (system.includes(extension)) return <FileCog className={cls} />;
-  return <FileIcon className={cls} />;
-}
 
 function RowActions({
   status,
@@ -163,7 +148,7 @@ export function DownloadRow({
     <div className="group border-b border-line hover:bg-surface/60 transition-colors">
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 py-3.5">
         <div className="w-9 h-9 rounded-lg bg-raised flex items-center justify-center text-muted shrink-0">
-          {iconForExtension(item.extension)}
+          <FileTypeIcon extension={item.extension} className="w-5 h-5" />
         </div>
 
         <div className="min-w-0">
