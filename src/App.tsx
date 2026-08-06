@@ -45,6 +45,12 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
   const downloadDirRef = useRef(settings.downloadDir);
+  const lastManualTabRef = useRef("all");
+  const activeIdRef = useRef(activeId);
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   useEffect(() => {
     downloadDirRef.current = settings.downloadDir;
@@ -126,6 +132,9 @@ export default function App() {
       .catch(() => {});
     onDownloadProgress((p) => {
       if (p.status === "completed") refreshStorage(downloadDirRef.current);
+      if (p.status === "error" && ["all", "downloading", "error"].includes(activeIdRef.current)) {
+        setActiveId("error");
+      }
       setDownloads((prev) => {
         const segments: SegmentInfo[] = p.segments.map((s) => ({
           index: s.index,
@@ -158,8 +167,13 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-  const countByStatus = (status: string) =>
+    const countByStatus = (status: string) =>
     downloads.filter((d) => d.status === status).length;
+
+  const handleSelectTab = (id: string) => {
+    lastManualTabRef.current = id;
+    setActiveId(id);
+  };
 
   const sections: SidebarSection[] = [
     { id: "all", label: "All downloads", count: downloads.length },
@@ -194,7 +208,7 @@ export default function App() {
 
   const addDownload = (item: DownloadItem) => {
     setDownloads((prev) => [item, ...prev]);
-    setActiveId("all");
+    setActiveId("downloading");
     setIsAddOpen(false);
   };
 
@@ -216,6 +230,7 @@ export default function App() {
   const handleResume = (id: string) => {
     if (isTauri) resumeDownload(id).catch(() => {});
     updateStatus(id, "downloading");
+    setActiveId("downloading");
   };
 
   const handleRemove = (id: string) => {
@@ -233,7 +248,7 @@ export default function App() {
       <Sidebar
         sections={sections}
         activeId={activeId}
-        onSelect={setActiveId}
+        onSelect={handleSelectTab}
         onOpenSettings={() => setIsSettingsOpen(true)}
         storage={isTauri ? storage : { totalBytes: 2.1 * 1024 * 1024 * 1024 * 1024, usedBytes: 1.9 * 1024 * 1024 * 1024 * 1024 }}
       />
