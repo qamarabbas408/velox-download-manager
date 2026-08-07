@@ -20,6 +20,19 @@ struct StorageStats {
     available_bytes: u64,
 }
 
+/// Resolve the platform's default downloads folder (Windows: %USERPROFILE%\Downloads,
+/// macOS/Linux: ~/Downloads). Falls back to the home directory if unavailable.
+#[tauri::command]
+fn default_download_dir(app: tauri::AppHandle) -> String {
+    app.path()
+        .download_dir()
+        .ok()
+        .or_else(|| std::env::home_dir())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Report disk usage of the volume that holds the given download directory.
 /// Used for the "Storage used" meter in the sidebar.
 #[tauri::command]
@@ -79,6 +92,7 @@ pub fn run() {
             probe_url,
             start_download,
             get_storage_stats,
+            default_download_dir,
             pause_download,
             resume_download,
             cancel_download,

@@ -1,6 +1,6 @@
 import type { DownloadItem, SegmentInfo } from "../types";
 
-const MOCK_DOWNLOAD_DIR = "/Users/qabbas715/Downloads";
+const MOCK_DOWNLOAD_DIR = "~/Downloads";
 
 function makeSegments(
   sizeBytes: number,
@@ -205,6 +205,6 @@ export const mockDownloads: DownloadItem[] = [
 export const mockSettings = {
   maxConnections: 16,
   defaultSegments: 8,
-  downloadDir: "/Users/qabbas715/Downloads",
+  downloadDir: "~/Downloads",
   resumeEnabled: true,
 };

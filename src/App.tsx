@@ -11,6 +11,7 @@ import { formatSpeed } from "./utils/format";
 import {
   getHistory,
   getStorageStats,
+  getDefaultDownloadDir,
   isTauri,
   listDownloads,
   onDownloadProgress,
@@ -74,10 +75,27 @@ export default function App() {
 
   useEffect(() => {
     if (!isTauri) return;
-    loadSettings().then((s) => {
-      setSettings(s);
-      setMaxConnections(s.maxConnections).catch(() => {});
-    }).catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        const [saved, osDefault] = await Promise.all([
+          loadSettings(),
+          getDefaultDownloadDir(),
+        ]);
+        if (cancelled) return;
+        const effective: AppSettings = {
+          ...saved,
+          downloadDir: saved.downloadDir.trim() || osDefault,
+        };
+        setSettings(effective);
+        setMaxConnections(effective.maxConnections).catch(() => {});
+      } catch {
+        if (cancelled) return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSaveSettings = (next: AppSettings) => {
