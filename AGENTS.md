@@ -1,7 +1,11 @@
 # AGENTS.md
 
 Guidelines for AI agents working in this repository.
-
+## AGENT TERMINAL COMMANDS 
+- QUESTION : means check code and answer (Dont change code or start new implementation)
+- LAYMAN : Explain in layman terms - in simpler words not with technical jargon 
+- PLAN : Means plan a bussiness requirement not implementation 
+- IMPLEMENT : start coding but make sure what you are codding has been PLANED first and user has given go-ahead permission
 ## App versioning
 
 The app version must be kept in sync across **all four** files:
@@ -34,3 +38,5 @@ change in one commit (e.g. `Bump app version to X.Y.Z`).
 - `v0.4.0` — IDM-style UI revamp (downloads table, selection/bulk actions,
   disk-space gauge, themed checkboxes and empty state)
 - `v0.5.0` — version sync bump
+
+
