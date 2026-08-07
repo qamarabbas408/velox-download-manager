@@ -166,8 +166,8 @@ export function AddDownloadModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-[560px] max-w-full bg-surface border border-line rounded-2xl shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="w-[560px] max-w-full bg-surface border border-line rounded-2xl shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 h-14 border-b border-line">
           <h2 className="font-display font-semibold text-sm">Add download</h2>
           <button onClick={onClose} className="p-1.5 rounded-md text-muted hover:text-ink hover:bg-raised" aria-label="Close">
@@ -175,7 +175,7 @@ export function AddDownloadModal({
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 overflow-y-auto max-h-[70vh]">
           <div className="flex items-center gap-2 bg-raised border border-line rounded-lg px-3 py-2.5 focus-within:border-signal/60">
             <Link2 className="w-4 h-4 text-dim shrink-0" />
             <input
@@ -200,7 +200,10 @@ export function AddDownloadModal({
           </div>
 
           {error && (
-            <p className="text-xs text-danger">{error}</p>
+            <div className="flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2.5">
+              <ShieldAlert className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
+              <p className="text-xs text-danger min-w-0 break-all leading-relaxed">{error}</p>
+            </div>
           )}
 
           {probe && (

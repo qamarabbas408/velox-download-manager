@@ -160,6 +160,24 @@ fn root_cause(e: &(dyn std::error::Error + 'static)) -> String {
     msg
 }
 
+/// Shorten a URL for display in error messages: strip any userinfo
+/// (credentials) and truncate very long URLs so they never blow up the UI.
+fn display_url(url: &str) -> String {
+    let mut out = url.to_string();
+    if let Some(scheme_end) = out.find("://") {
+        if let Some(at) = out[scheme_end + 3..].find('@') {
+            let at = scheme_end + 3 + at;
+            out = format!("{}…@{}", &out[..scheme_end + 3], &out[at + 1..]);
+        }
+    }
+    if out.chars().count() > 80 {
+        let truncated: String = out.chars().take(80).collect();
+        format!("{truncated}…")
+    } else {
+        out
+    }
+}
+
 fn describe_reqwest_error(url: &str, e: &reqwest::Error) -> String {
     let cause = root_cause(e);
     let c = cause.to_lowercase();
@@ -178,7 +196,7 @@ fn describe_reqwest_error(url: &str, e: &reqwest::Error) -> String {
     } else {
         cause
     };
-    format!("Could not reach {url} — {friendly}")
+    format!("Could not reach {} — {}", display_url(url), friendly)
 }
 
 async fn describe_http_status(resp: reqwest::Response) -> String {
