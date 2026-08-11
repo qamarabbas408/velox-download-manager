@@ -8,6 +8,12 @@
     "opener:default",
     "dialog:default",
     "store:default",
-    "clipboard-manager:allow-read-text"
+    "clipboard-manager:allow-read-text",
+    "notification:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-progress-bar",
+    "core:window:allow-destroy"
   ]
 }
