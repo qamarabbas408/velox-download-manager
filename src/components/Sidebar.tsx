@@ -71,82 +71,85 @@ export function Sidebar({
         </div>
       </div>
 
-      {allSection && (
-        <>
-          <button
-            onClick={() => {
-              setLibraryOpen((v) => !v);
-              onSelect("all");
-            }}
-            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-raised text-ink text-sm mt-3"
-          >
-            <span className="flex items-center gap-2.5">
-              <HardDrive className="w-4 h-4" />
-              All Downloads
-            </span>
-            <span className="flex items-center gap-2">
-              <span className="font-mono text-xs text-dim">{allSection.count}</span>
-              {libraryOpen ? (
-                <ChevronDown className="w-4 h-4 text-dim" />
-              ) : (
-                <ChevronRight className="w-4 h-4 text-dim" />
-              )}
-            </span>
-          </button>
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 pr-1 -mr-1">
+        <nav>
+          {allSection && (
+          <>
+            <button
+              onClick={() => {
+                setLibraryOpen((v) => !v);
+                onSelect("all");
+              }}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-raised text-ink text-sm mt-3"
+            >
+              <span className="flex items-center gap-2.5">
+                <HardDrive className="w-4 h-4" />
+                All Downloads
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="font-mono text-xs text-dim">{allSection.count}</span>
+                {libraryOpen ? (
+                  <ChevronDown className="w-4 h-4 text-dim" />
+                ) : (
+                  <ChevronRight className="w-4 h-4 text-dim" />
+                )}
+              </span>
+            </button>
 
-          {libraryOpen &&
-            allSection.children?.map((child) => {
-              const isActive = child.id === activeId;
-              const Icon = CATEGORY_ICONS[child.id.replace("cat:", "")] ?? FileText;
-              return (
-                <button
-                  key={child.id}
-                  onClick={() => onSelect(child.id)}
-                  className={[
-                    "w-full flex items-center gap-2.5 pl-8 pr-3 py-2 rounded-lg text-sm transition-colors",
-                    isActive
-                      ? "bg-raised text-ink"
-                      : "text-muted hover:text-ink hover:bg-raised/60",
-                  ].join(" ")}
-                >
-                  <Icon className="w-4 h-4" />
-                  <span className="flex-1 text-left">{child.label}</span>
-                  <span className="font-mono text-xs text-dim">{child.count}</span>
-                </button>
-              );
-            })}
-        </>
-      )}
+            {libraryOpen &&
+              allSection.children?.map((child) => {
+                const isActive = child.id === activeId;
+                const Icon = CATEGORY_ICONS[child.id.replace("cat:", "")] ?? FileText;
+                return (
+                  <button
+                    key={child.id}
+                    onClick={() => onSelect(child.id)}
+                    className={[
+                      "w-full flex items-center gap-2.5 pl-8 pr-3 py-2 rounded-lg text-sm transition-colors",
+                      isActive
+                        ? "bg-raised text-ink"
+                        : "text-muted hover:text-ink hover:bg-raised/60",
+                    ].join(" ")}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span className="flex-1 text-left">{child.label}</span>
+                    <span className="font-mono text-xs text-dim">{child.count}</span>
+                  </button>
+                );
+              })}
+          </>
+        )}
 
-      <div className="border-t border-line my-2" />
+        <div className="border-t border-line my-2" />
 
-      {statusSections.map((section) => {
-        const isActive = section.id === activeId;
-        const Icon =
-          section.id === "in-progress"
-            ? ArrowDown
-            : section.id === "error"
-              ? AlertTriangle
-              : CheckCheck;
-        return (
-          <button
-            key={section.id}
-            onClick={() => onSelect(section.id)}
-            className={[
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
-              isActive
-                ? "bg-raised text-ink"
-                : "text-muted hover:text-ink hover:bg-raised/60",
-            ].join(" ")}
-          >
-            <Icon className="w-4 h-4" />
-            <span className="flex-1 text-left">{section.label}</span>
-            <span className="font-mono text-xs text-dim">{section.count}</span>
-          </button>
-        );
-      })}
+        {statusSections.map((section) => {
+          const isActive = section.id === activeId;
+          const Icon =
+            section.id === "in-progress"
+              ? ArrowDown
+              : section.id === "error"
+                ? AlertTriangle
+                : CheckCheck;
+          return (
+            <button
+              key={section.id}
+              onClick={() => onSelect(section.id)}
+              className={[
+                "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
+                isActive
+                  ? "bg-raised text-ink"
+                  : "text-muted hover:text-ink hover:bg-raised/60",
+              ].join(" ")}
+            >
+              <Icon className="w-4 h-4" />
+              <span className="flex-1 text-left">{section.label}</span>
+              <span className="font-mono text-xs text-dim">{section.count}</span>
+            </button>
+          );
+        })}
+        </nav>
 
-      <div className="mt-auto pt-4 space-y-2">
+        <div className="mt-auto pt-4 space-y-2">
         <div className="rounded-2xl bg-raised/40 border border-line p-4">
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm text-muted flex items-center gap-2">
@@ -204,6 +207,7 @@ export function Sidebar({
           {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           {theme === "dark" ? "Light theme" : "Dark theme"}
         </button>
+        </div>
       </div>
     </aside>
   );
