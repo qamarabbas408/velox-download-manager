@@ -6,6 +6,11 @@ import { BottomBar } from "./components/BottomBar";
 import { EmptyState } from "./components/EmptyState";
 import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
+import {
+  notifyDownloadComplete,
+  notifyDownloadFailed,
+  useSystemTray,
+} from "./hooks/useSystemTray";
 import { mockDownloads, mockSettings } from "./data/mockDownloads";
 import { formatSpeed } from "./utils/format";
 import {
@@ -52,10 +57,16 @@ export default function App() {
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
+  const notifiedIdsRef = useRef<Set<string>>(new Set());
+  const downloadsRef = useRef<DownloadItem[]>(downloads);
 
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    downloadsRef.current = downloads;
+  }, [downloads]);
 
   useEffect(() => {
     downloadDirRef.current = settings.downloadDir;
@@ -157,6 +168,17 @@ export default function App() {
       if (p.status === "error" && ["all", "in-progress", "error"].includes(activeIdRef.current)) {
         setActiveId("error");
       }
+      if (
+        (p.status === "completed" || p.status === "error") &&
+        !notifiedIdsRef.current.has(p.id)
+      ) {
+        notifiedIdsRef.current.add(p.id);
+        const item = downloadsRef.current.find((d) => d.id === p.id);
+        if (item) {
+          if (p.status === "completed") notifyDownloadComplete(item.name, item.extension);
+          else notifyDownloadFailed(item.name, item.extension);
+        }
+      }
       setDownloads((prev) => {
         const segments: SegmentInfo[] = p.segments.map((s) => ({
           index: s.index,
@@ -243,6 +265,11 @@ export default function App() {
     0
   );
 
+  const totalActiveSize = activeDownloads.reduce((sum, d) => sum + d.sizeBytes, 0);
+  const totalActiveDone = activeDownloads.reduce((sum, d) => sum + d.downloadedBytes, 0);
+  const taskbarProgress =
+    totalActiveSize > 0 ? Math.round((totalActiveDone / totalActiveSize) * 100) : null;
+
   const addDownload = (item: DownloadItem) => {
     setDownloads((prev) => [item, ...prev]);
     setActiveId("in-progress");
@@ -265,6 +292,7 @@ export default function App() {
   };
 
   const handleResume = (id: string) => {
+    notifiedIdsRef.current.delete(id);
     if (isTauri) resumeDownload(id).catch(() => {});
     updateStatus(id, "downloading");
     setActiveId("in-progress");
@@ -310,6 +338,14 @@ export default function App() {
   const handleStopAll = () => {
     downloads.filter((d) => d.status === "downloading").forEach((d) => handlePause(d.id));
   };
+
+  useSystemTray({
+    activeCount: activeDownloads.length,
+    totalSpeedLabel: formatSpeed(totalSpeed),
+    hasActive: activeDownloads.length > 0,
+    taskbarProgress,
+    onPauseAll: handleStopAll,
+  });
 
   const handleDeleteSelected = () => {
     visibleDownloads.filter((d) => selectedIds.has(d.id)).forEach((d) => handleRemove(d.id));
