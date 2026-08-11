@@ -6,6 +6,7 @@ import { BottomBar } from "./components/BottomBar";
 import { EmptyState } from "./components/EmptyState";
 import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { ConfirmDeleteModal } from "./components/ConfirmDeleteModal";
 import {
   notifyDownloadComplete,
   notifyDownloadFailed,
@@ -54,6 +55,7 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; names: string[] } | null>(null);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
@@ -298,8 +300,8 @@ export default function App() {
     setActiveId("in-progress");
   };
 
-  const handleRemove = (id: string) => {
-    if (isTauri) removeDownload(id).catch(() => {});
+  const handleRemove = (id: string, deleteFile = false) => {
+    if (isTauri) removeDownload(id, deleteFile).catch(() => {});
     setDownloads((prev) => prev.filter((d) => d.id !== id));
     refreshStorage(downloadDirRef.current);
   };
@@ -348,17 +350,40 @@ export default function App() {
   });
 
   const handleDeleteSelected = () => {
-    visibleDownloads.filter((d) => selectedIds.has(d.id)).forEach((d) => handleRemove(d.id));
+    const selected = visibleDownloads.filter((d) => selectedIds.has(d.id));
+    const completed = selected.filter((d) => d.status === "completed");
+    const others = selected.filter((d) => d.status !== "completed");
+    others.forEach((d) => handleRemove(d.id));
+    if (completed.length > 0) {
+      setPendingDelete({
+        ids: completed.map((d) => d.id),
+        names: completed.map((d) => `${d.name}.${d.extension}`),
+      });
+    }
     setSelectedIds(new Set());
   };
 
   const handleRemoveWithDeselect = (id: string) => {
-    handleRemove(id);
+    const item = downloads.find((d) => d.id === id);
     setSelectedIds((prev) => {
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
+    if (item && item.status === "completed") {
+      setPendingDelete({
+        ids: [id],
+        names: [`${item.name}.${item.extension}`],
+      });
+    } else {
+      handleRemove(id);
+    }
+  };
+
+  const handleConfirmDelete = (deleteFile: boolean) => {
+    if (!pendingDelete) return;
+    pendingDelete.ids.forEach((id) => handleRemove(id, deleteFile));
+    setPendingDelete(null);
   };
 
   return (
@@ -431,6 +456,12 @@ export default function App() {
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
         onSave={handleSaveSettings}
+      />
+
+      <ConfirmDeleteModal
+        names={pendingDelete?.names ?? []}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={handleConfirmDelete}
       />
     </div>
   );

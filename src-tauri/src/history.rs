@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -108,6 +108,26 @@ pub async fn delete_history(pool: &SqlitePool, id: &str) -> sqlx::Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn fetch_one(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<DownloadRow>> {
+    let rows = sqlx::query("SELECT * FROM downloads WHERE id = ? LIMIT 1")
+        .bind(id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().next().map(|r| row_from_sql(&r)))
+}
+
+// Absolute path of the finished file on disk for a history row.
+pub fn file_path(row: &DownloadRow) -> PathBuf {
+    let mut path = PathBuf::from(&row.download_dir);
+    let mut file_name = row.name.clone();
+    if !row.extension.is_empty() {
+        file_name.push('.');
+        file_name.push_str(&row.extension);
+    }
+    path.push(file_name);
+    path
 }
 
 fn row_from_sql(r: &sqlx::sqlite::SqliteRow) -> DownloadRow {

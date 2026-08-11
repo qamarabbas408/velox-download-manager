@@ -91,8 +91,8 @@ export function cancelDownload(id: string): Promise<void> {
   return invoke("cancel_download", { id });
 }
 
-export function removeDownload(id: string): Promise<void> {
-  return invoke("remove_download", { id });
+export function removeDownload(id: string, deleteFile = false): Promise<void> {
+  return invoke("remove_download", { id, deleteFile });
 }
 
 export function listDownloads(): Promise<ResumeSummary[]> {

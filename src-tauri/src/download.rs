@@ -927,11 +927,13 @@ pub async fn cancel_download(
 
 // Remove a download from the list entirely — whether it is currently active or
 // a completed/history entry. Cancels and deletes the file if it exists, removes
-// any resume state, and deletes the history row.
+// any resume state, and deletes the history row. For history-only (finished)
+// downloads, `delete_file` moves the file on disk to the recycle bin.
 #[tauri::command]
 pub async fn remove_download(
     manager: State<'_, DownloadManager>,
     id: String,
+    delete_file: bool,
 ) -> Result<(), String> {
     if let Some(dl) = manager.downloads.lock().await.remove(&id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
@@ -939,6 +941,13 @@ pub async fn remove_download(
         persist::delete_state(&state_path(&manager, &id)).await;
     } else {
         // Might be a history entry only — still clear any orphaned file/state.
+        if delete_file {
+            if let Some(pool) = &manager.hist {
+                if let Some(row) = history::fetch_one(pool, &id).await.unwrap_or(None) {
+                    let _ = trash::delete(&history::file_path(&row));
+                }
+            }
+        }
         persist::delete_state(&state_path(&manager, &id)).await;
     }
     if let Some(pool) = &manager.hist {
