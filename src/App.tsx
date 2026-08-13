@@ -7,13 +7,13 @@ import { EmptyState } from "./components/EmptyState";
 import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { ConfirmDeleteModal } from "./components/ConfirmDeleteModal";
+import { DownloadDetailDrawer } from "./components/DownloadDetailDrawer";
 import {
   notifyDownloadComplete,
   notifyDownloadFailed,
   useSystemTray,
 } from "./hooks/useSystemTray";
-import { mockDownloads, mockSettings } from "./data/mockDownloads";
-import { formatSpeed } from "./utils/format";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./store";
 import {
   getHistory,
   getStorageStats,
@@ -27,9 +27,9 @@ import {
   revealDownload,
   setMaxConnections,
 } from "./engine";
-import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
-import { loadSettings, saveSettings } from "./store";
+import type { AppSettings, DownloadItem, DownloadSpeedSample, SegmentInfo, SidebarSection } from "./types";
 import { CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_PREFIX, categoryFor } from "./categories";
+import { formatSpeed } from "./utils/format";
 
 function toStatus(status: string): DownloadItem["status"] {
   switch (status) {
@@ -45,10 +45,8 @@ function toStatus(status: string): DownloadItem["status"] {
 }
 
 export default function App() {
-  const [downloads, setDownloads] = useState<DownloadItem[]>(() =>
-    isTauri ? [] : mockDownloads
-  );
-  const [settings, setSettings] = useState<AppSettings>(mockSettings);
+  const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [activeId, setActiveId] = useState("all");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -56,11 +54,13 @@ export default function App() {
   const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; names: string[] } | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
   const notifiedIdsRef = useRef<Set<string>>(new Set());
   const downloadsRef = useRef<DownloadItem[]>(downloads);
+  const downloadHistoryRef = useRef<Map<string, DownloadSpeedSample[]>>(new Map());
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -150,7 +150,7 @@ export default function App() {
               downloadedBytes: s.downloadedBytes,
               speedBytesPerSec: 0,
               etaSeconds: null,
-              status: "downloading",
+              status: "queued",
               rangeSupported: s.rangeSupported,
               segments: [],
               source: s.url,
@@ -211,6 +211,28 @@ export default function App() {
       unlisten = fn;
     });
     return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    const intervalMs = 400;
+    const windowMs = 90_000;
+    const id = setInterval(() => {
+      const now = Date.now();
+      const cutoff = now - windowMs;
+      const hist = downloadHistoryRef.current;
+      for (const d of downloadsRef.current) {
+        if (d.status !== "downloading") continue;
+        const arr = hist.get(d.id) ?? [];
+        arr.push({ t: now, speed: d.speedBytesPerSec });
+        let drop = 0;
+        while (drop < arr.length && arr[drop].t < cutoff) drop++;
+        if (drop > 0) arr.splice(0, drop);
+        if (arr.length > 300) arr.splice(0, arr.length - 300);
+        hist.set(d.id, arr);
+      }
+    }, intervalMs);
+    return () => clearInterval(id);
   }, []);
 
   const countByStatus = (status: string) =>
@@ -282,7 +304,12 @@ export default function App() {
     setDownloads((prev) =>
       prev.map((d) =>
         d.id === id
-          ? { ...d, status, speedBytesPerSec: status === "downloading" ? d.speedBytesPerSec || 5 * 1024 * 1024 : 0 }
+          ? {
+              ...d,
+              status,
+              speedBytesPerSec: status === "downloading" ? d.speedBytesPerSec : 0,
+              etaSeconds: status === "downloading" ? d.etaSeconds : null,
+            }
           : d
       )
     );
@@ -303,6 +330,8 @@ export default function App() {
   const handleRemove = (id: string, deleteFile = false) => {
     if (isTauri) removeDownload(id, deleteFile).catch(() => {});
     setDownloads((prev) => prev.filter((d) => d.id !== id));
+    downloadHistoryRef.current.delete(id);
+    setDetailId((prev) => (prev === id ? null : prev));
     refreshStorage(downloadDirRef.current);
   };
 
@@ -386,6 +415,8 @@ export default function App() {
     setPendingDelete(null);
   };
 
+  const closeDetailDrawer = useCallback(() => setDetailId(null), []);
+
   return (
     <div className="flex h-screen w-full bg-base text-ink font-body overflow-hidden">
       <Sidebar
@@ -393,7 +424,7 @@ export default function App() {
         activeId={activeId}
         onSelect={handleSelectTab}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        storage={isTauri ? storage : { totalBytes: 2.1 * 1024 * 1024 * 1024 * 1024, usedBytes: 1.9 * 1024 * 1024 * 1024 * 1024 }}
+        storage={storage}
       />
 
       <main className="flex-1 flex flex-col min-w-0">
@@ -424,6 +455,7 @@ export default function App() {
               items={visibleDownloads}
               selectedIds={selectedIds}
               onToggleSelect={toggleSelect}
+              onOpenDetail={setDetailId}
               onPause={handlePause}
               onResume={handleResume}
               onRetry={handleResume}
@@ -462,6 +494,13 @@ export default function App() {
         names={pendingDelete?.names ?? []}
         onCancel={() => setPendingDelete(null)}
         onConfirm={handleConfirmDelete}
+      />
+
+      <DownloadDetailDrawer
+        item={detailId ? downloads.find((d) => d.id === detailId) ?? null : null}
+        history={detailId ? downloadHistoryRef.current.get(detailId) ?? [] : []}
+        modalOpen={isAddOpen || isSettingsOpen}
+        onClose={closeDetailDrawer}
       />
     </div>
   );

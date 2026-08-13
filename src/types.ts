@@ -15,6 +15,11 @@ export interface SegmentInfo {
   state: SegmentState;
 }
 
+export interface DownloadSpeedSample {
+  t: number;
+  speed: number;
+}
+
 export interface DownloadItem {
   id: string;
   name: string;

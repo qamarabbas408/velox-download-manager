@@ -6,6 +6,7 @@ export function DownloadsTable({
   items,
   selectedIds,
   onToggleSelect,
+  onOpenDetail,
   onPause,
   onResume,
   onRetry,
@@ -15,6 +16,7 @@ export function DownloadsTable({
   items: DownloadItem[];
   selectedIds: Set<string>;
   onToggleSelect: (id: string) => void;
+  onOpenDetail: (id: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
@@ -24,13 +26,14 @@ export function DownloadsTable({
   return (
     <div className="divide-y divide-line">
       {items.map((item) => (
-        <div key={item.id} className="flex items-center">
-          <label className="pl-5 pr-2 shrink-0 flex items-center">
+        <div key={item.id} className="flex items-start">
+          <label className="pl-5 pr-2 shrink-0 flex items-center pt-6">
             <Checkbox checked={selectedIds.has(item.id)} onChange={() => onToggleSelect(item.id)} />
           </label>
           <div className="flex-1 min-w-0">
             <DownloadRow
               item={item}
+              onOpenDetail={() => onOpenDetail(item.id)}
               onPause={() => onPause(item.id)}
               onResume={() => onResume(item.id)}
               onRetry={() => onRetry(item.id)}
