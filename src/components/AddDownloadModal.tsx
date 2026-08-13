@@ -16,26 +16,6 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-function mockProbe(url: string): ProbeResult {
-  const parsed = new URL(url);
-  const raw = parsed.pathname.split("/").filter(Boolean).pop() ?? "download";
-  const dot = raw.lastIndexOf(".");
-  const hasExt = dot > 0 && dot < raw.length - 1;
-
-  const name = hasExt ? raw.slice(0, dot) : raw;
-  const extension = hasExt ? raw.slice(dot + 1) : "bin";
-  const rangeSupported = !/\.(html?|php)$/i.test(raw);
-
-  return {
-    url,
-    name,
-    extension,
-    sizeBytes: Math.floor(20 + Math.random() * 3000) * 1024 * 1024,
-    rangeSupported,
-    contentType: rangeSupported ? "application/octet-stream" : "text/html",
-  };
-}
-
 export function AddDownloadModal({
   open,
   settings,
@@ -68,7 +48,11 @@ export function AddDownloadModal({
     setError(null);
     setProbe(null);
     try {
-      const result = isTauri ? await engineProbe(targetUrl) : await new Promise<ProbeResult>((res) => setTimeout(() => res(mockProbe(targetUrl)), 600));
+      if (!isTauri) {
+        setError("Downloading is only available in the Velox desktop app.");
+        return;
+      }
+      const result = await engineProbe(targetUrl);
       setProbe(result);
     } catch (e) {
       setError(String(e));
@@ -121,10 +105,8 @@ export function AddDownloadModal({
       start: i * chunk,
       end: i === effectiveConnections - 1 ? probe.sizeBytes : (i + 1) * chunk,
       downloaded: 0,
-      state: i < Math.min(4, effectiveConnections) ? ("active" as const) : ("idle" as const),
+      state: "idle" as const,
     }));
-
-    const speed = effectiveConnections * 2.4 * 1024 * 1024;
 
     onAdd({
       id,
@@ -132,8 +114,8 @@ export function AddDownloadModal({
       extension: probe.extension,
       sizeBytes: probe.sizeBytes,
       downloadedBytes: 0,
-      speedBytesPerSec: speed,
-      etaSeconds: Math.round(probe.sizeBytes / speed),
+      speedBytesPerSec: 0,
+      etaSeconds: null,
       status: "downloading",
       rangeSupported: probe.rangeSupported,
       segments,

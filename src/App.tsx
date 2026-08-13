@@ -6,13 +6,13 @@ import { BottomBar } from "./components/BottomBar";
 import { EmptyState } from "./components/EmptyState";
 import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { SpeedChart, type SpeedSample } from "./components/SpeedChart";
 import {
   notifyDownloadComplete,
   notifyDownloadFailed,
   useSystemTray,
 } from "./hooks/useSystemTray";
-import { mockDownloads, mockSettings } from "./data/mockDownloads";
-import { formatSpeed } from "./utils/format";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./store";
 import {
   getHistory,
   getStorageStats,
@@ -27,8 +27,8 @@ import {
   setMaxConnections,
 } from "./engine";
 import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
-import { loadSettings, saveSettings } from "./store";
 import { CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_PREFIX, categoryFor } from "./categories";
+import { formatSpeed } from "./utils/format";
 
 function toStatus(status: string): DownloadItem["status"] {
   switch (status) {
@@ -44,16 +44,15 @@ function toStatus(status: string): DownloadItem["status"] {
 }
 
 export default function App() {
-  const [downloads, setDownloads] = useState<DownloadItem[]>(() =>
-    isTauri ? [] : mockDownloads
-  );
-  const [settings, setSettings] = useState<AppSettings>(mockSettings);
+  const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [activeId, setActiveId] = useState("all");
   const [search, setSearch] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [speedSamples, setSpeedSamples] = useState<SpeedSample[]>([]);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
@@ -211,6 +210,24 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  useEffect(() => {
+    if (!isTauri) return;
+    const intervalMs = 400;
+    const windowMs = 90_000;
+    const id = setInterval(() => {
+      setSpeedSamples((prev) => {
+        const now = Date.now();
+        const speed = downloadsRef.current
+          .filter((d) => d.status === "downloading")
+          .reduce((sum, d) => sum + d.speedBytesPerSec, 0);
+        const next = [...prev, { t: now, speed }];
+        const cutoff = now - windowMs;
+        return next.filter((s) => s.t >= cutoff);
+      });
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, []);
+
   const countByStatus = (status: string) =>
     downloads.filter((d) => d.status === status).length;
 
@@ -280,7 +297,7 @@ export default function App() {
     setDownloads((prev) =>
       prev.map((d) =>
         d.id === id
-          ? { ...d, status, speedBytesPerSec: status === "downloading" ? d.speedBytesPerSec || 5 * 1024 * 1024 : 0 }
+          ? { ...d, status, speedBytesPerSec: status === "downloading" ? d.speedBytesPerSec : 0 }
           : d
       )
     );
@@ -368,7 +385,7 @@ export default function App() {
         activeId={activeId}
         onSelect={handleSelectTab}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        storage={isTauri ? storage : { totalBytes: 2.1 * 1024 * 1024 * 1024 * 1024, usedBytes: 1.9 * 1024 * 1024 * 1024 * 1024 }}
+        storage={storage}
       />
 
       <main className="flex-1 flex flex-col min-w-0">
@@ -387,6 +404,8 @@ export default function App() {
           onStopAll={handleStopAll}
           hasActive={activeDownloads.length > 0}
         />
+
+        <SpeedChart samples={speedSamples} currentSpeed={totalSpeed} />
 
         <div className="flex-1 overflow-y-auto">
           {visibleDownloads.length === 0 ? (
