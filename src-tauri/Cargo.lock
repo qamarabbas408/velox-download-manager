@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "futures-util",

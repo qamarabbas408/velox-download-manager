@@ -2,6 +2,21 @@
 
 All notable changes to Velox are documented in this file.
 
+## [0.5.2] — 2026-08-13
+
+### Added
+- Per-download detail drawer with a live speed graph — click any download row to open a drawer showing stats (size, downloaded, speed, ETA, average speed, active connections), a 90-second speed chart, per-segment progress, and source URL / save location
+- Option to delete completed downloads from disk — removing a finished download can also send the file to the Recycle Bin instead of just clearing the list entry
+
+### Fixed
+- Speed graph now scrolls correctly while a download is active (the graph window was stalling during live updates)
+- Keyboard users can activate the Pause / Resume / Remove row actions again instead of opening the details drawer
+- Focus returns to the triggering row when the details drawer closes
+- Windows save paths no longer mix separator styles (e.g. `C:\…\Downloads\file.zip`)
+
+### Changed
+- Removed static mock download data — all UI data now comes from the download engine
+
 ## [0.5.1] — 2026-08-11
 
 ### Added
