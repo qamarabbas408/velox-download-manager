@@ -6,6 +6,7 @@ export function DownloadsTable({
   items,
   selectedIds,
   onToggleSelect,
+  onOpenDetail,
   onPause,
   onResume,
   onRetry,
@@ -15,6 +16,7 @@ export function DownloadsTable({
   items: DownloadItem[];
   selectedIds: Set<string>;
   onToggleSelect: (id: string) => void;
+  onOpenDetail: (id: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
@@ -31,6 +33,7 @@ export function DownloadsTable({
           <div className="flex-1 min-w-0">
             <DownloadRow
               item={item}
+              onOpenDetail={() => onOpenDetail(item.id)}
               onPause={() => onPause(item.id)}
               onResume={() => onResume(item.id)}
               onRetry={() => onRetry(item.id)}

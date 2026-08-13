@@ -6,7 +6,7 @@ import { BottomBar } from "./components/BottomBar";
 import { EmptyState } from "./components/EmptyState";
 import { AddDownloadModal } from "./components/AddDownloadModal";
 import { SettingsModal } from "./components/SettingsModal";
-import { SpeedChart, type SpeedSample } from "./components/SpeedChart";
+import { DownloadDetailDrawer } from "./components/DownloadDetailDrawer";
 import {
   notifyDownloadComplete,
   notifyDownloadFailed,
@@ -26,7 +26,7 @@ import {
   revealDownload,
   setMaxConnections,
 } from "./engine";
-import type { AppSettings, DownloadItem, SegmentInfo, SidebarSection } from "./types";
+import type { AppSettings, DownloadItem, DownloadSpeedSample, SegmentInfo, SidebarSection } from "./types";
 import { CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_PREFIX, categoryFor } from "./categories";
 import { formatSpeed } from "./utils/format";
 
@@ -52,12 +52,13 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [storage, setStorage] = useState<{ totalBytes: number; usedBytes: number } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [speedSamples, setSpeedSamples] = useState<SpeedSample[]>([]);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
   const notifiedIdsRef = useRef<Set<string>>(new Set());
   const downloadsRef = useRef<DownloadItem[]>(downloads);
+  const downloadHistoryRef = useRef<Map<string, DownloadSpeedSample[]>>(new Map());
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -147,7 +148,7 @@ export default function App() {
               downloadedBytes: s.downloadedBytes,
               speedBytesPerSec: 0,
               etaSeconds: null,
-              status: "downloading",
+              status: "queued",
               rangeSupported: s.rangeSupported,
               segments: [],
               source: s.url,
@@ -215,15 +216,19 @@ export default function App() {
     const intervalMs = 400;
     const windowMs = 90_000;
     const id = setInterval(() => {
-      setSpeedSamples((prev) => {
-        const now = Date.now();
-        const speed = downloadsRef.current
-          .filter((d) => d.status === "downloading")
-          .reduce((sum, d) => sum + d.speedBytesPerSec, 0);
-        const next = [...prev, { t: now, speed }];
-        const cutoff = now - windowMs;
-        return next.filter((s) => s.t >= cutoff);
-      });
+      const now = Date.now();
+      const cutoff = now - windowMs;
+      const hist = downloadHistoryRef.current;
+      for (const d of downloadsRef.current) {
+        if (d.status !== "downloading") continue;
+        const arr = hist.get(d.id) ?? [];
+        arr.push({ t: now, speed: d.speedBytesPerSec });
+        let drop = 0;
+        while (drop < arr.length && arr[drop].t < cutoff) drop++;
+        if (drop > 0) arr.splice(0, drop);
+        if (arr.length > 300) arr.splice(0, arr.length - 300);
+        hist.set(d.id, arr);
+      }
     }, intervalMs);
     return () => clearInterval(id);
   }, []);
@@ -297,7 +302,12 @@ export default function App() {
     setDownloads((prev) =>
       prev.map((d) =>
         d.id === id
-          ? { ...d, status, speedBytesPerSec: status === "downloading" ? d.speedBytesPerSec : 0 }
+          ? {
+              ...d,
+              status,
+              speedBytesPerSec: status === "downloading" ? d.speedBytesPerSec : 0,
+              etaSeconds: status === "downloading" ? d.etaSeconds : null,
+            }
           : d
       )
     );
@@ -318,6 +328,8 @@ export default function App() {
   const handleRemove = (id: string) => {
     if (isTauri) removeDownload(id).catch(() => {});
     setDownloads((prev) => prev.filter((d) => d.id !== id));
+    downloadHistoryRef.current.delete(id);
+    setDetailId((prev) => (prev === id ? null : prev));
     refreshStorage(downloadDirRef.current);
   };
 
@@ -378,6 +390,8 @@ export default function App() {
     });
   };
 
+  const closeDetailDrawer = useCallback(() => setDetailId(null), []);
+
   return (
     <div className="flex h-screen w-full bg-base text-ink font-body overflow-hidden">
       <Sidebar
@@ -405,8 +419,6 @@ export default function App() {
           hasActive={activeDownloads.length > 0}
         />
 
-        <SpeedChart samples={speedSamples} currentSpeed={totalSpeed} />
-
         <div className="flex-1 overflow-y-auto">
           {visibleDownloads.length === 0 ? (
             <EmptyState
@@ -418,6 +430,7 @@ export default function App() {
               items={visibleDownloads}
               selectedIds={selectedIds}
               onToggleSelect={toggleSelect}
+              onOpenDetail={setDetailId}
               onPause={handlePause}
               onResume={handleResume}
               onRetry={handleResume}
@@ -450,6 +463,13 @@ export default function App() {
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
         onSave={handleSaveSettings}
+      />
+
+      <DownloadDetailDrawer
+        item={detailId ? downloads.find((d) => d.id === detailId) ?? null : null}
+        history={detailId ? downloadHistoryRef.current.get(detailId) ?? [] : []}
+        modalOpen={isAddOpen || isSettingsOpen}
+        onClose={closeDetailDrawer}
       />
     </div>
   );
