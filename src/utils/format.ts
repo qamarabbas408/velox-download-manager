@@ -25,3 +25,11 @@ export function progressPercent(item: { downloadedBytes: number; sizeBytes: numb
   if (item.sizeBytes === 0) return 0;
   return Math.min(100, (item.downloadedBytes / item.sizeBytes) * 100);
 }
+
+// Build a display path using the platform separator found in the directory
+// (Windows download dirs contain backslashes; everything else uses slashes).
+export function joinPathForDisplay(directory: string, fileName: string): string {
+  const dir = directory.replace(/[\\/]+$/, "");
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return `${dir}${sep}${fileName}`;
+}

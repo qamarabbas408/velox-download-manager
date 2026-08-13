@@ -3,7 +3,7 @@ import { X, Loader2, Link2, ShieldCheck, ShieldAlert, Plus, FolderOpen } from "l
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppSettings, DownloadItem, ProbeResult } from "../types";
-import { formatBytes } from "../utils/format";
+import { formatBytes, joinPathForDisplay } from "../utils/format";
 import { isTauri, probeUrl as engineProbe, startDownload } from "../engine";
 import { FileTypeIcon } from "./FileTypeIcon";
 
@@ -249,7 +249,7 @@ export function AddDownloadModal({
               <div className="flex items-center justify-between text-xs">
                 <span className="text-muted">Save to</span>
                 <span className="font-mono text-[11px] text-dim truncate max-w-[220px]">
-                  {downloadDir}/{probe.name}.{probe.extension}
+                  {joinPathForDisplay(downloadDir, `${probe.name}.${probe.extension}`)}
                 </span>
               </div>
               <div className="flex items-center gap-2 bg-raised border border-line rounded-lg px-3 py-2.5">

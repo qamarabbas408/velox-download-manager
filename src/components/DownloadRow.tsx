@@ -35,7 +35,7 @@ function RowActions({
 }) {
   const btn = "p-1.5 rounded-md text-muted hover:text-ink hover:bg-raised transition-colors";
   return (
-    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
       {status === "downloading" && (
         <button className={btn} aria-label="Pause download" onClick={onPause}>
           <Pause className="w-4 h-4" />
@@ -91,7 +91,7 @@ export function DownloadRow({
       className="group border-b border-line hover:bg-surface/60 transition-colors cursor-pointer focus-visible:outline-none focus-visible:bg-surface/60"
       onClick={onOpenDetail}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
+        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
           e.preventDefault();
           onOpenDetail();
         }

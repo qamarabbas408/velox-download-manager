@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { X, Activity, Link2, FolderOpen, Server, AlertTriangle, Check, Loader2, Circle } from "lucide-react";
 import type { DownloadItem, DownloadSpeedSample, SegmentInfo } from "../types";
-import { formatBytes, formatEta, formatSpeed, progressPercent } from "../utils/format";
+import { formatBytes, formatEta, formatSpeed, joinPathForDisplay, progressPercent } from "../utils/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 
 const WIDTH = 720;
@@ -179,37 +179,36 @@ export function DownloadDetailDrawer({
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const prevItemIdRef = useRef<string | null>(null);
+  const itemId = item?.id ?? null;
 
   useEffect(() => {
-    if (!item) return;
+    if (!itemId) return;
+    setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [item]);
+  }, [itemId]);
 
   useEffect(() => {
-    if (!item || modalOpen) return;
+    if (!itemId || modalOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [item, modalOpen, onClose]);
+  }, [itemId, modalOpen, onClose]);
 
-  const itemId = item?.id ?? null;
   useLayoutEffect(() => {
-    if (itemId === null) return;
+    if (itemId === null) {
+      returnFocusRef.current?.focus?.();
+      returnFocusRef.current = null;
+      prevItemIdRef.current = null;
+      return;
+    }
     if (prevItemIdRef.current !== itemId) {
       prevItemIdRef.current = itemId;
       returnFocusRef.current = document.activeElement as HTMLElement | null;
       closeBtnRef.current?.focus();
     }
-    return () => {
-      if (itemId === null) {
-        returnFocusRef.current?.focus?.();
-        returnFocusRef.current = null;
-        prevItemIdRef.current = null;
-      }
-    };
   }, [itemId]);
 
   if (!item) return null;
@@ -320,7 +319,7 @@ export function DownloadDetailDrawer({
               <div className="min-w-0">
                 <p className="text-[10px] uppercase tracking-wider text-dim">Save location</p>
                 <p className="mt-0.5 font-mono text-[11px] text-muted break-all">
-                  {item.downloadDir}/{item.name}.{item.extension}
+                  {joinPathForDisplay(item.downloadDir, `${item.name}.${item.extension}`)}
                 </p>
               </div>
             </div>
