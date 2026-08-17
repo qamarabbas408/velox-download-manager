@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppSettings, DownloadItem, ProbeResult } from "../types";
 import { formatBytes, joinPathForDisplay } from "../utils/format";
-import { isTauri, probeUrl as engineProbe, startDownload } from "../engine";
+import { isTauri, getDefaultDownloadDir, probeUrl as engineProbe, startDownload } from "../engine";
 import { FileTypeIcon } from "./FileTypeIcon";
 
 function isHttpUrl(value: string): boolean {
@@ -70,6 +70,20 @@ export function AddDownloadModal({
     setDownloadDir(settings.downloadDir);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  useEffect(() => {
+    if (!open || settings.downloadDir.trim()) return;
+    let cancelled = false;
+    getDefaultDownloadDir()
+      .then((dir) => {
+        if (!cancelled && dir.trim()) setDownloadDir(dir);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, settings.downloadDir]);
 
   useEffect(() => {
     if (!open || !isTauri || url !== "") return;

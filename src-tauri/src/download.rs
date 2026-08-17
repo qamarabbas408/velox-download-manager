@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_TYPE, RANGE};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{Mutex, Semaphore};
@@ -828,8 +828,16 @@ pub async fn start_download(
     manager: State<'_, DownloadManager>,
     request: StartRequest,
 ) -> Result<(), String> {
-    let file_path = PathBuf::from(&request.download_dir)
-        .join(format!("{}.{}", request.name, request.extension));
+    let download_dir = if request.download_dir.trim().is_empty() {
+        app.path()
+            .download_dir()
+            .ok()
+            .or_else(std::env::home_dir)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    } else {
+        PathBuf::from(&request.download_dir)
+    };
+    let file_path = download_dir.join(format!("{}.{}", request.name, request.extension));
     let max_conn = manager.max_conn.load(Ordering::Relaxed).max(1);
 
     let dl = Arc::new(ActiveDownload {
@@ -1044,12 +1052,42 @@ pub async fn list_downloads(
 
 #[tauri::command]
 pub async fn get_history(
+    app: AppHandle,
     manager: State<'_, DownloadManager>,
 ) -> Result<Vec<history::DownloadRow>, String> {
-    match &manager.hist {
-        Some(pool) => history::fetch_history(pool, 500).await.map_err(|e| e.to_string()),
-        None => Ok(Vec::new()),
+    let Some(pool) = &manager.hist else {
+        return Ok(Vec::new());
+    };
+    let mut rows = history::fetch_history(pool, 500).await.map_err(|e| e.to_string())?;
+
+    // Backfill rows saved before the download_dir column was populated. Those
+    // downloads were written relative to the app's current working directory,
+    // so probe that location for the finished file as a best-effort recovery.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    for row in rows.iter_mut() {
+        if !row.download_dir.trim().is_empty() {
+            continue;
+        }
+        let file_name = if row.extension.is_empty() {
+            row.name.clone()
+        } else {
+            format!("{}.{}", row.name, row.extension)
+        };
+        let candidate = cwd.join(&file_name);
+        if candidate.exists() {
+            row.download_dir = cwd.to_string_lossy().into_owned();
+        } else {
+            let fallback = app
+                .path()
+                .download_dir()
+                .ok()
+                .or_else(std::env::home_dir)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            row.download_dir = fallback.to_string_lossy().into_owned();
+        }
     }
+
+    Ok(rows)
 }
 
 /// Resize the global connection pool at runtime (e.g. when the user saves a

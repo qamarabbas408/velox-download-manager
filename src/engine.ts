@@ -120,9 +120,11 @@ export function revealDownload(
   name: string,
   extension: string
 ): Promise<void> {
-  const path = downloadDir.endsWith("/") || downloadDir.endsWith("\\")
-    ? `${downloadDir}${name}.${extension}`
-    : `${downloadDir}/${name}.${extension}`;
+  const dir = downloadDir.trim();
+  if (!dir) return Promise.resolve();
+  const path = dir.endsWith("/") || dir.endsWith("\\")
+    ? `${dir}${name}.${extension}`
+    : `${dir}/${name}.${extension}`;
   return revealItemInDir(path);
 }
 
