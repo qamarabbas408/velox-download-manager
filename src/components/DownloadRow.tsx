@@ -20,6 +20,7 @@ const statusLabel: Record<DownloadStatus, string> = {
 
 function RowActions({
   status,
+  missing,
   onPause,
   onResume,
   onRetry,
@@ -27,6 +28,7 @@ function RowActions({
   onRemove,
 }: {
   status: DownloadStatus;
+  missing?: boolean;
   onPause: () => void;
   onResume: () => void;
   onRetry: () => void;
@@ -51,7 +53,7 @@ function RowActions({
           <RotateCw className="w-4 h-4" />
         </button>
       )}
-      {status === "completed" && (
+      {status === "completed" && !missing && (
         <button className={btn} aria-label="Show in folder" onClick={onReveal}>
           <FolderOpen className="w-4 h-4" />
         </button>
@@ -105,11 +107,19 @@ export function DownloadRow({
 
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1.5">
-            <p className="font-body text-sm text-ink truncate">
+            <p className={`font-body text-sm truncate ${item.missing ? "text-dim line-through" : "text-ink"}`}>
               {item.name}
               <span className="text-dim">.{item.extension}</span>
             </p>
-            {item.rangeSupported && (
+            {item.missing && (
+              <span
+                className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-danger/15 text-danger"
+                title="File not found on disk"
+              >
+                File missing
+              </span>
+            )}
+            {item.rangeSupported && !item.missing && (
               <span className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-raised text-dim" title="Server supports byte ranges">
                 segmented
               </span>
@@ -152,6 +162,7 @@ export function DownloadRow({
           </span>
           <RowActions
             status={item.status}
+            missing={item.missing}
             onPause={onPause}
             onResume={onResume}
             onRetry={onRetry}

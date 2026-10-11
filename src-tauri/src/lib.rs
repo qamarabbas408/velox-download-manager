@@ -3,7 +3,7 @@ mod download;
 mod history;
 mod persist;
 
-use download::{cancel_download, get_history, list_downloads, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, DownloadManager};
+use download::{cancel_download, get_history, list_downloads, missing_files, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, DownloadManager};
 use serde::Serialize;
 use tauri::Manager;
 
@@ -109,6 +109,7 @@ pub fn run() {
             remove_download,
             list_downloads,
             get_history,
+            missing_files,
             set_max_connections,
         ])
         .run(tauri::generate_context!())

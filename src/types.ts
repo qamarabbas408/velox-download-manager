@@ -34,6 +34,7 @@ export interface DownloadItem {
   source: string;
   downloadDir: string;
   errorMessage?: string | null;
+  missing?: boolean;
 }
 
 export interface SidebarSection {

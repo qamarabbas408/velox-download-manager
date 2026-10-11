@@ -258,8 +258,14 @@ export function DownloadDetailDrawer({
           <div className="px-5 py-4 border-b border-line space-y-3">
             <div className="grid grid-cols-3 gap-2 text-center">
               {[
-                { label: "Size", value: formatBytes(item.sizeBytes) },
-                { label: "Downloaded", value: `${formatBytes(item.downloadedBytes)} · ${pct}%` },
+                { label: "Size", value: item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : "Unknown" },
+                {
+                  label: "Downloaded",
+                  value:
+                    item.sizeBytes > 0
+                      ? `${formatBytes(item.downloadedBytes)} · ${pct}%`
+                      : formatBytes(item.downloadedBytes),
+                },
                 { label: "Speed", value: formatSpeed(item.speedBytesPerSec) },
                 { label: "ETA", value: formatEta(item.etaSeconds) },
                 { label: "Avg speed", value: formatSpeed(avgSpeed) },
@@ -323,6 +329,14 @@ export function DownloadDetailDrawer({
                 </p>
               </div>
             </div>
+            {item.missing && (
+              <div className="flex items-start gap-2.5 rounded-lg bg-paused/10 border border-paused/25 px-3 py-2.5">
+                <AlertTriangle size={14} className="text-paused mt-0.5 shrink-0" aria-hidden />
+                <p className="text-[11px] text-paused/90">
+                  This file was moved or deleted from disk. Use Remove to clear this entry.
+                </p>
+              </div>
+            )}
             {item.status === "error" && item.errorMessage && (
               <div className="flex items-start gap-2.5 rounded-lg bg-danger/10 border border-danger/25 px-3 py-2.5">
                 <AlertTriangle size={14} className="text-danger mt-0.5 shrink-0" aria-hidden />

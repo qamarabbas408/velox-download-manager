@@ -1143,6 +1143,28 @@ pub async fn get_history(
     Ok(rows)
 }
 
+/// Return the ids of completed downloads whose file is no longer present on
+/// disk (e.g. deleted or moved outside Velox). Used to flag stale entries.
+#[tauri::command]
+pub async fn missing_files(manager: State<'_, DownloadManager>) -> Result<Vec<String>, String> {
+    let Some(pool) = &manager.hist else {
+        return Ok(Vec::new());
+    };
+    let rows = history::fetch_history(pool, 500)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut missing = Vec::new();
+    for row in rows {
+        if row.status != "completed" {
+            continue;
+        }
+        if !history::file_path(&row).exists() {
+            missing.push(row.id);
+        }
+    }
+    Ok(missing)
+}
+
 /// Resize the global connection pool at runtime (e.g. when the user saves a
 /// new "Max connections" value in Settings). Increasing adds permits;
 /// decreasing removes them as in-flight requests finish.

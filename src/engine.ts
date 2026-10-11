@@ -108,6 +108,10 @@ export function getHistory(): Promise<HistoryRow[]> {
   return invoke("get_history");
 }
 
+export function getMissingFiles(): Promise<string[]> {
+  return invoke("missing_files");
+}
+
 export function getStorageStats(downloadDir: string): Promise<StorageStats> {
   return invoke("get_storage_stats", { path: downloadDir });
 }

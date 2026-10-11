@@ -17,6 +17,7 @@ import {
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./store";
 import {
   getHistory,
+  getMissingFiles,
   getStorageStats,
   getDefaultDownloadDir,
   isTauri,
@@ -90,6 +91,27 @@ export default function App() {
       .then((s) => setStorage({ totalBytes: s.totalBytes, usedBytes: s.usedBytes }))
       .catch(() => {});
   }, []);
+
+  const refreshMissing = useCallback(() => {
+    if (!isTauri) return;
+    getMissingFiles()
+      .then((ids) => {
+        const set = new Set(ids);
+        setDownloads((prev) =>
+          prev.map((d) =>
+            d.status === "completed" ? { ...d, missing: set.has(d.id) } : d
+          )
+        );
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    const onFocus = () => refreshMissing();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshMissing]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -177,6 +199,7 @@ export default function App() {
       .catch(() => {})
       .finally(() => {
         initialLoadDoneRef.current = true;
+        refreshMissing();
       });
     onDownloadProgress((p) => {
       if (p.status === "completed") refreshStorage(downloadDirRef.current);
@@ -213,13 +236,19 @@ export default function App() {
             ? Math.round((p.totalBytes - p.downloadedBytes) / p.speedBytesPerSec)
             : null;
         const existing = prev.find((d) => d.id === p.id);
+        const resolvedSize =
+          p.totalBytes > 0
+            ? p.totalBytes
+            : toStatus(p.status) === "completed"
+              ? p.downloadedBytes
+              : null;
         if (!existing) {
           // A download started outside the UI (e.g. from the browser extension).
           const item: DownloadItem = {
             id: p.id,
             name: p.name,
             extension: p.extension,
-            sizeBytes: p.totalBytes,
+            sizeBytes: resolvedSize ?? 0,
             downloadedBytes: p.downloadedBytes,
             speedBytesPerSec: p.speedBytesPerSec,
             etaSeconds: eta,
@@ -237,6 +266,7 @@ export default function App() {
             ? {
                 ...d,
                 status: toStatus(p.status),
+                sizeBytes: resolvedSize ?? d.sizeBytes,
                 downloadedBytes: p.downloadedBytes,
                 speedBytesPerSec: p.speedBytesPerSec,
                 etaSeconds: eta,
@@ -425,13 +455,13 @@ export default function App() {
 
   const handleDeleteSelected = () => {
     const selected = visibleDownloads.filter((d) => selectedIds.has(d.id));
-    const completed = selected.filter((d) => d.status === "completed");
-    const others = selected.filter((d) => d.status !== "completed");
-    others.forEach((d) => handleRemove(d.id));
-    if (completed.length > 0) {
+    const withFile = selected.filter((d) => d.status === "completed" && !d.missing);
+    const plain = selected.filter((d) => !(d.status === "completed" && !d.missing));
+    plain.forEach((d) => handleRemove(d.id));
+    if (withFile.length > 0) {
       setPendingDelete({
-        ids: completed.map((d) => d.id),
-        names: completed.map((d) => `${d.name}.${d.extension}`),
+        ids: withFile.map((d) => d.id),
+        names: withFile.map((d) => `${d.name}.${d.extension}`),
       });
     }
     setSelectedIds(new Set());
@@ -444,7 +474,7 @@ export default function App() {
       next.delete(id);
       return next;
     });
-    if (item && item.status === "completed") {
+    if (item && item.status === "completed" && !item.missing) {
       setPendingDelete({
         ids: [id],
         names: [`${item.name}.${item.extension}`],
