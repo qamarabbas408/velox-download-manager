@@ -87,6 +87,11 @@ pub struct SegmentState {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadProgress {
     pub id: String,
+    pub name: String,
+    pub extension: String,
+    pub source: String,
+    pub download_dir: String,
+    pub range_supported: bool,
     pub status: DownloadStatus,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
@@ -266,7 +271,7 @@ fn derive_filename(url: &str, content_disposition: Option<&str>) -> (String, Str
     }
 }
 
-async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, String> {
+pub async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, String> {
     let head = client
         .head(url)
         .timeout(PROBE_TIMEOUT)
@@ -405,7 +410,9 @@ async fn aggregate(dl: &ActiveDownload) -> (u64, bool) {
         .iter()
         .map(|s| s.current.saturating_sub(s.start))
         .sum();
-    let done = segs.iter().all(|s| s.current >= s.end);
+    // Completion is driven by segment state, not by comparing offsets to `end`.
+    // This also handles unbounded (unknown-length) segments whose `end` is 0.
+    let done = !segs.is_empty() && segs.iter().all(|s| s.state == "done");
     (downloaded, done)
 }
 
@@ -413,10 +420,30 @@ async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
     let status = *dl.status.lock().await;
     let segments = dl.segments.lock().await.clone();
     let error = dl.last_error.lock().await.clone();
+    let name = dl
+        .file_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let extension = dl
+        .file_path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bin".to_string());
+    let download_dir = dl
+        .file_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let _ = app.emit(
         "download://progress",
         DownloadProgress {
             id: dl.id.clone(),
+            name,
+            extension,
+            source: dl.url.clone(),
+            download_dir,
+            range_supported: dl.range_supported,
             status,
             downloaded_bytes: downloaded,
             total_bytes: dl.total_size,
@@ -580,13 +607,17 @@ async fn run_segment_inner(
 
     let end = seg.end;
     let mut current = seg.current;
+    // Some servers omit Content-Length and ignore Range (returning 200). Stream
+    // those responses to EOF in a single unbounded segment instead of failing.
+    let unbounded = dl.total_size == 0;
+    let accept_full = unbounded || !dl.range_supported;
 
     file.seek(SeekFrom::Start(current))
         .await
         .map_err(|e| SegmentError::permanent(format!("seek failed: {e}")))?;
 
-    let range = if end >= dl.total_size {
-        format!("bytes={}-", current)
+    let range = if unbounded || end >= dl.total_size {
+        format!("bytes={current}-")
     } else {
         format!("bytes={}-{}", current, end.saturating_sub(1))
     };
@@ -599,7 +630,7 @@ async fn run_segment_inner(
         .map_err(|e| SegmentError::transient(format!("range request failed: {e}")))?;
 
     let status = resp.status();
-    if status != StatusCode::PARTIAL_CONTENT {
+    if status != StatusCode::PARTIAL_CONTENT && !(accept_full && status == StatusCode::OK) {
         let retriable = status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
@@ -612,14 +643,23 @@ async fn run_segment_inner(
     }
 
     let mut stream = resp.bytes_stream();
-    while current < end {
+    loop {
         if dl.pause_flag.load(Ordering::Relaxed) || dl.cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        if !unbounded && current >= end {
             break;
         }
         match stream.next().await {
             Some(Ok(chunk)) => {
-                let room = (end - current) as usize;
-                let n = chunk.len().min(room);
+                let n = if unbounded {
+                    chunk.len()
+                } else {
+                    chunk.len().min((end - current) as usize)
+                };
+                if n == 0 {
+                    continue;
+                }
                 if file.write_all(&chunk[..n]).await.is_err() {
                     break;
                 }
@@ -631,7 +671,8 @@ async fn run_segment_inner(
         }
     }
 
-    if current >= end {
+    let stopped = dl.pause_flag.load(Ordering::Relaxed) || dl.cancel_flag.load(Ordering::Relaxed);
+    if !stopped && (unbounded || current >= end) {
         set_segment_state(&dl, seg.index, "done").await;
     } else {
         set_segment_state(&dl, seg.index, "idle").await;
@@ -661,8 +702,10 @@ async fn run_download_inner(
         let fresh = segs.is_empty();
         drop(segs);
         if fresh {
-            if dl.total_size > 0 {
-                if let Ok(f) = File::create(&dl.file_path).await {
+            // Always create the target file. When the size is known we preallocate;
+            // for unknown-length responses the file grows as we stream to EOF.
+            if let Ok(f) = File::create(&dl.file_path).await {
+                if dl.total_size > 0 {
                     let _ = f.set_len(dl.total_size).await;
                 }
             }
@@ -828,6 +871,16 @@ pub async fn start_download(
     manager: State<'_, DownloadManager>,
     request: StartRequest,
 ) -> Result<(), String> {
+    begin_download(&app, manager.inner(), request).await
+}
+
+/// Shared entry point for starting a segmented download. Used by both the
+/// `start_download` Tauri command and the browser-integration IPC host.
+pub async fn begin_download(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    request: StartRequest,
+) -> Result<(), String> {
     let download_dir = if request.download_dir.trim().is_empty() {
         app.path()
             .download_dir()
@@ -860,14 +913,14 @@ pub async fn start_download(
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
     if !restored {
-        let _ = persist::delete_state(&state_path(&manager, &request.id)).await;
+        let _ = persist::delete_state(&state_path(manager, &request.id)).await;
     }
 
     manager.downloads.lock().await.insert(request.id, dl.clone());
     let client = manager.client.clone();
     let resume_dir = manager.resume_dir.clone();
     let hist = manager.hist.clone();
-    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir, hist));
+    tauri::async_runtime::spawn(run_download(app.clone(), dl, client, resume_dir, hist));
     Ok(())
 }
 
@@ -1352,6 +1405,77 @@ mod tests {
 
         assert_eq!(*dl.status.lock().await, DownloadStatus::Completed);
         assert!(peak.load(Ordering::Relaxed) <= 2, "peak concurrency was {}", peak.load(Ordering::Relaxed));
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        handle.abort();
+    }
+
+    /// A server that omits Content-Length and ignores Range (Cloudflare/Ezoic
+    /// style) must still download by streaming the 200 response to EOF.
+    #[tokio::test]
+    async fn unknown_length_download_completes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let data = DATA.to_vec();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                let data = data.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 2048];
+                    let mut req = String::new();
+                    loop {
+                        let n = match stream.read(&mut buf).await {
+                            Ok(n) => n,
+                            Err(_) => return,
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        req.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if req.contains("\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    // 200 with no Content-Length and no Accept-Ranges; close to signal EOF.
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = stream.write_all(&data).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let dir = std::env::temp_dir().join(format!("velox-nolen-test-{}", std::process::id()));
+        let file_path = dir.join("result.bin");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let dl = Arc::new(ActiveDownload {
+            id: "nolen".to_string(),
+            url: format!("{base}/file.bin"),
+            file_path: file_path.clone(),
+            total_size: 0,
+            range_supported: false,
+            segment_count: 1,
+            status: Mutex::new(DownloadStatus::Queued),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            segments: Mutex::new(Vec::new()),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(4)),
+        });
+
+        let client = reqwest::Client::new();
+        run_download_inner(None, dl.clone(), client, &dir, None).await;
+
+        assert_eq!(*dl.status.lock().await, DownloadStatus::Completed);
         let got = tokio::fs::read(&file_path).await.unwrap();
         assert_eq!(got, DATA);
 

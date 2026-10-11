@@ -25,8 +25,9 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["stream", "json"] }
-tokio = { version = "1", features = ["fs", "io-util", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time", "macros", "net"] }
 futures-util = "0.3"
+velox-protocol = { path = "../crates/velox-protocol" }
 tauri-plugin-store = "2.4.4"
 tauri-plugin-clipboard-manager = "2"
 sysinfo = "0.33"

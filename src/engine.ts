@@ -27,6 +27,11 @@ export interface EngineSegment {
 
 export interface EngineProgress {
   id: string;
+  name: string;
+  extension: string;
+  source: string;
+  downloadDir: string;
+  rangeSupported: boolean;
   status: "queued" | "downloading" | "paused" | "completed" | "error";
   downloadedBytes: number;
   totalBytes: number;

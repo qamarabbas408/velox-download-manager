@@ -40,12 +40,14 @@ export function Sidebar({
   onSelect,
   onOpenSettings,
   storage,
+  highlightId,
 }: {
   sections: SidebarSection[];
   activeId: string;
   onSelect: (id: string) => void;
   onOpenSettings: () => void;
   storage: { totalBytes: number; usedBytes: number } | null;
+  highlightId?: string | null;
 }) {
   const { theme, toggleTheme } = useTheme();
   const [libraryOpen, setLibraryOpen] = useState(true);
@@ -69,6 +71,14 @@ export function Sidebar({
             Download manager
           </span>
         </div>
+        {import.meta.env.DEV && (
+          <span
+            title="Development build"
+            className="ml-auto self-start text-[9px] font-semibold tracking-widest px-1.5 py-0.5 rounded border border-paused/50 text-paused"
+          >
+            DEV
+          </span>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 pr-1 -mr-1">
@@ -143,6 +153,9 @@ export function Sidebar({
             >
               <Icon className="w-4 h-4" />
               <span className="flex-1 text-left">{section.label}</span>
+              {highlightId === section.id && (
+                <span className="w-2 h-2 rounded-full bg-signal animate-pulse" />
+              )}
               <span className="font-mono text-xs text-dim">{section.count}</span>
             </button>
           );

@@ -124,7 +124,10 @@ export function DownloadRow({
           />
 
           <div className="flex items-center gap-3 mt-1.5 font-mono text-[11px] text-muted">
-            <span>{formatBytes(item.downloadedBytes)} / {formatBytes(item.sizeBytes)}</span>
+            <span>
+              {formatBytes(item.downloadedBytes)}
+              {item.sizeBytes > 0 ? ` / ${formatBytes(item.sizeBytes)}` : " downloaded"}
+            </span>
             <span className="text-dim">·</span>
             <span>{formatSpeed(item.speedBytesPerSec)}</span>
             <span className="text-dim">·</span>

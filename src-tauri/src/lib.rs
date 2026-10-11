@@ -1,3 +1,4 @@
+mod browser_host;
 mod download;
 mod history;
 mod persist;
@@ -86,6 +87,14 @@ pub fn run() {
             let db_path = data_dir.join("downloads.sqlite");
             let hist = tauri::async_runtime::block_on(history::open_pool(&db_path)).ok();
             app.manage(DownloadManager::new(resume_dir, hist));
+            browser_host::spawn(app.handle().clone());
+
+            // Distinguish dev builds from the installed production app.
+            #[cfg(debug_assertions)]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title("Velox (Dev)");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
