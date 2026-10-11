@@ -3,7 +3,7 @@ mod download;
 mod history;
 mod persist;
 
-use download::{cancel_download, get_history, list_downloads, missing_files, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, DownloadManager};
+use download::{cancel_download, get_history, list_downloads, missing_files, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, start_download_copy, DownloadManager};
 use serde::Serialize;
 use tauri::Manager;
 
@@ -101,6 +101,7 @@ pub fn run() {
             greet,
             probe_url,
             start_download,
+            start_download_copy,
             get_storage_stats,
             default_download_dir,
             pause_download,

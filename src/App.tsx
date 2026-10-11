@@ -265,6 +265,8 @@ export default function App() {
           d.id === p.id
             ? {
                 ...d,
+                name: p.name,
+                extension: p.extension,
                 status: toStatus(p.status),
                 sizeBytes: resolvedSize ?? d.sizeBytes,
                 downloadedBytes: p.downloadedBytes,
@@ -555,8 +557,10 @@ export default function App() {
         open={isAddOpen}
         settings={settings}
         activeConnections={activeConnections}
+        downloads={downloads}
         onClose={() => setIsAddOpen(false)}
         onAdd={addDownload}
+        onResume={handleResume}
       />
 
       <SettingsModal

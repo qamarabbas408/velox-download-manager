@@ -145,7 +145,7 @@ where
                         range_supported: probe.range_supported,
                         segments: DEFAULT_SEGMENTS,
                     };
-                    match begin_download(app, manager.inner(), request).await {
+                    match begin_download(app, manager.inner(), request, false).await {
                         Ok(()) => {
                             reply(
                                 writer,
@@ -155,7 +155,9 @@ where
                             )
                             .await
                         }
-                        Err(e) => reply_error(writer, &env.id, "START_FAILED", &e).await,
+                        Err(e) => {
+                            reply_error(writer, &env.id, e.code(), &e.message()).await
+                        }
                     }
                 }
                 Err(e) => reply_error(writer, &env.id, "PROBE_FAILED", &e).await,

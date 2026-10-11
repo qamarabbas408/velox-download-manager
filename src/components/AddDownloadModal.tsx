@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppSettings, DownloadItem, ProbeResult } from "../types";
 import { formatBytes, joinPathForDisplay } from "../utils/format";
-import { isTauri, getDefaultDownloadDir, probeUrl as engineProbe, startDownload } from "../engine";
+import { isTauri, getDefaultDownloadDir, probeUrl as engineProbe, startDownload, startDownloadCopy } from "../engine";
 import { FileTypeIcon } from "./FileTypeIcon";
 
 function isHttpUrl(value: string): boolean {
@@ -16,23 +16,36 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+function errInfo(e: unknown): { code?: string; message: string } {
+  if (e && typeof e === "object" && "message" in e) {
+    const err = e as { code?: string; message?: unknown };
+    return { code: err.code, message: String(err.message ?? "Failed") };
+  }
+  return { message: String(e) };
+}
+
 export function AddDownloadModal({
   open,
   settings,
   activeConnections,
+  downloads,
   onClose,
   onAdd,
+  onResume,
 }: {
   open: boolean;
   settings: AppSettings;
   activeConnections: number;
+  downloads: DownloadItem[];
   onClose: () => void;
   onAdd: (item: DownloadItem) => void;
+  onResume: (id: string) => void;
 }) {
   const [url, setUrl] = useState("");
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [conflictProbe, setConflictProbe] = useState<ProbeResult | null>(null);
   const [connections, setConnections] = useState(settings.defaultSegments);
   const [downloadDir, setDownloadDir] = useState(settings.downloadDir);
 
@@ -66,6 +79,7 @@ export function AddDownloadModal({
     setUrl("");
     setProbe(null);
     setError(null);
+    setConflictProbe(null);
     setConnections(settings.defaultSegments);
     setDownloadDir(settings.downloadDir);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -110,55 +124,96 @@ export function AddDownloadModal({
     if (typeof dir === "string") setDownloadDir(dir);
   };
 
-  const handleAdd = async () => {
-    if (!probe) return;
+  const resetForm = () => {
+    setUrl("");
+    setProbe(null);
+    setConflictProbe(null);
+    setConnections(settings.defaultSegments);
+    setDownloadDir(settings.downloadDir);
+  };
+
+  const start = async (target: ProbeResult, copy: boolean) => {
     const id = crypto.randomUUID();
-    const chunk = Math.floor(probe.sizeBytes / effectiveConnections);
-    const segments = Array.from({ length: effectiveConnections }, (_, i) => ({
+    const conns = target.rangeSupported ? connections : 1;
+    const chunk = conns > 0 ? Math.floor(target.sizeBytes / conns) : 0;
+    const segments = Array.from({ length: conns }, (_, i) => ({
       index: i,
       start: i * chunk,
-      end: i === effectiveConnections - 1 ? probe.sizeBytes : (i + 1) * chunk,
+      end: i === conns - 1 ? target.sizeBytes : (i + 1) * chunk,
       downloaded: 0,
       state: "idle" as const,
     }));
 
-    onAdd({
-      id,
-      name: probe.name,
-      extension: probe.extension,
-      sizeBytes: probe.sizeBytes,
-      downloadedBytes: 0,
-      speedBytesPerSec: 0,
-      etaSeconds: null,
-      status: "downloading",
-      rangeSupported: probe.rangeSupported,
-      segments,
-      source: probe.url,
-      downloadDir,
-    });
-
     if (isTauri) {
+      const request = {
+        id,
+        url: target.url,
+        name: target.name,
+        extension: target.extension,
+        sizeBytes: target.sizeBytes,
+        downloadDir,
+        rangeSupported: target.rangeSupported,
+        segments: conns,
+      };
       try {
-        await startDownload({
-          id,
-          url: probe.url,
-          name: probe.name,
-          extension: probe.extension,
-          sizeBytes: probe.sizeBytes,
-          downloadDir,
-          rangeSupported: probe.rangeSupported,
-          segments: effectiveConnections,
-        });
+        if (copy) await startDownloadCopy(request);
+        else await startDownload(request);
       } catch (e) {
-        setError(String(e));
+        const info = errInfo(e);
+        if (info.code === "ALREADY_PAUSED") {
+          setConflictProbe(target);
+          setError(null);
+        } else {
+          setError(info.message);
+        }
         return;
       }
     }
 
-    setUrl("");
-    setProbe(null);
-    setConnections(settings.defaultSegments);
-    setDownloadDir(settings.downloadDir);
+    onAdd({
+      id,
+      name: target.name,
+      extension: target.extension,
+      sizeBytes: target.sizeBytes,
+      downloadedBytes: 0,
+      speedBytesPerSec: 0,
+      etaSeconds: null,
+      status: "downloading",
+      rangeSupported: target.rangeSupported,
+      segments,
+      source: target.url,
+      downloadDir,
+    });
+    resetForm();
+  };
+
+  const handleAdd = () => {
+    if (probe) void start(probe, false);
+  };
+
+  const handleResumeExisting = () => {
+    if (!conflictProbe) return;
+    const sameUrl = (d: DownloadItem) => d.source === conflictProbe.url;
+    const paused = downloads.find((d) => sameUrl(d) && d.status === "paused");
+    if (paused) {
+      onResume(paused.id);
+      onClose();
+      return;
+    }
+    // State may have changed while the prompt was open.
+    const active = downloads.find(
+      (d) => sameUrl(d) && (d.status === "downloading" || d.status === "queued")
+    );
+    if (active) {
+      onClose();
+      return;
+    }
+    // The existing record is gone — start a copy instead.
+    void start(conflictProbe, true);
+  };
+
+  const handleDownloadCopy = () => {
+    if (conflictProbe) void start(conflictProbe, true);
   };
 
   return (
@@ -181,6 +236,7 @@ export function AddDownloadModal({
                 setUrl(e.target.value);
                 setProbe(null);
                 setError(null);
+                setConflictProbe(null);
               }}
               placeholder="https://example.com/file.zip"
               className="bg-transparent text-sm text-ink placeholder:text-dim outline-none w-full min-w-0"
@@ -199,6 +255,35 @@ export function AddDownloadModal({
             <div className="flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2.5">
               <ShieldAlert className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
               <p className="text-xs text-danger min-w-0 break-all leading-relaxed">{error}</p>
+            </div>
+          )}
+
+          {conflictProbe && (
+            <div className="rounded-lg border border-paused/30 bg-paused/10 px-3 py-3 space-y-2">
+              <p className="text-xs text-paused font-medium">This download is already paused.</p>
+              <p className="text-[11px] text-muted leading-relaxed">
+                Resume the existing download, or start another copy with a unique filename.
+              </p>
+              <div className="flex items-center gap-2 pt-0.5">
+                <button
+                  onClick={handleResumeExisting}
+                  className="btn-primary text-xs font-medium px-3 py-1.5 rounded-md transition-all"
+                >
+                  Resume existing
+                </button>
+                <button
+                  onClick={handleDownloadCopy}
+                  className="bg-raised border border-line text-xs font-medium px-3 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                >
+                  Download another copy
+                </button>
+                <button
+                  onClick={() => setConflictProbe(null)}
+                  className="text-xs px-2 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
 

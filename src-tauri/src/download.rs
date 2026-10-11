@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -117,6 +117,10 @@ pub struct ResumeSummary {
     pub progress_percent: u64,
 }
 
+/// Destination paths currently reserved by in-flight downloads, so two
+/// independent downloads can never write to the same file.
+pub type ReservedPaths = Arc<Mutex<HashSet<PathBuf>>>;
+
 pub struct ActiveDownload {
     pub id: String,
     pub url: String,
@@ -138,6 +142,8 @@ pub struct ActiveDownload {
     pub run_lock: Mutex<()>,
     /// Incremented on each (re)start; a run whose generation is stale exits.
     pub generation: AtomicU64,
+    /// Shared destination-path registry this download participates in.
+    pub reserved: ReservedPaths,
 }
 
 pub struct DownloadManager {
@@ -147,6 +153,7 @@ pub struct DownloadManager {
     pub conn_pool: Arc<Semaphore>,
     pub max_conn: AtomicUsize,
     downloads: Mutex<HashMap<String, Arc<ActiveDownload>>>,
+    pub reserved_paths: ReservedPaths,
 }
 
 impl DownloadManager {
@@ -158,6 +165,7 @@ impl DownloadManager {
             conn_pool: Arc::new(Semaphore::new(DEFAULT_MAX_CONN)),
             max_conn: AtomicUsize::new(DEFAULT_MAX_CONN),
             downloads: Mutex::new(HashMap::new()),
+            reserved_paths: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -831,6 +839,7 @@ async fn run_download_inner(
                     join.abort_all();
                     while join.join_next().await.is_some() {}
                     reset_unfinished_segments(&dl).await;
+                    release_path(&dl.reserved, &dl.file_path).await;
                     write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
@@ -853,6 +862,7 @@ async fn run_download_inner(
                 if done && join.is_empty() {
                     *dl.status.lock().await = DownloadStatus::Completed;
                     persist::delete_state(&persist::state_path(resume_dir, &dl.id)).await;
+                    release_path(&dl.reserved, &dl.file_path).await;
                     write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
@@ -919,6 +929,7 @@ async fn run_download_inner(
         return;
     }
     *dl.status.lock().await = DownloadStatus::Error;
+    release_path(&dl.reserved, &dl.file_path).await;
     if let Some(app) = app {
         emit_progress(app, &dl, aggregate(&dl).await.0).await;
     }
@@ -934,8 +945,97 @@ pub async fn start_download(
     app: AppHandle,
     manager: State<'_, DownloadManager>,
     request: StartRequest,
-) -> Result<(), String> {
-    begin_download(&app, manager.inner(), request).await
+) -> Result<(), StartErrorDto> {
+    begin_download(&app, manager.inner(), request, false)
+        .await
+        .map_err(|e| e.to_dto())
+}
+
+/// Start a download explicitly as an additional copy, bypassing paused-URL
+/// deduplication (the destination is still uniquely reserved).
+#[tauri::command]
+pub async fn start_download_copy(
+    app: AppHandle,
+    manager: State<'_, DownloadManager>,
+    request: StartRequest,
+) -> Result<(), StartErrorDto> {
+    begin_download(&app, manager.inner(), request, true)
+        .await
+        .map_err(|e| e.to_dto())
+}
+
+/// Why a download could not be started.
+#[derive(Debug)]
+pub enum StartError {
+    /// The same URL is already actively downloading.
+    DuplicateActive,
+    /// The same URL exists but is paused.
+    DuplicatePaused,
+    /// Any other failure.
+    Other(String),
+}
+
+impl StartError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            StartError::DuplicateActive => "ALREADY_DOWNLOADING",
+            StartError::DuplicatePaused => "ALREADY_PAUSED",
+            StartError::Other(_) => "START_FAILED",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            StartError::DuplicateActive => "This URL is already downloading.".to_string(),
+            StartError::DuplicatePaused => {
+                "This download is paused in Velox. Resume it there, or download another copy."
+                    .to_string()
+            }
+            StartError::Other(m) => m.clone(),
+        }
+    }
+
+    pub fn to_dto(&self) -> StartErrorDto {
+        StartErrorDto {
+            code: self.code().to_string(),
+            message: self.message(),
+        }
+    }
+}
+
+/// Serializable start failure returned to the frontend (Tauri commands).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartErrorDto {
+    pub code: String,
+    pub message: String,
+}
+
+/// Reserve the first available destination path for `name.extension` in `dir`,
+/// accounting for files already on disk and paths reserved by in-flight
+/// downloads. Returns the chosen path and the (possibly suffixed) name.
+async fn reserve_path(
+    dir: &Path,
+    name: &str,
+    extension: &str,
+    reserved: &ReservedPaths,
+) -> (PathBuf, String) {
+    let mut set = reserved.lock().await;
+    let mut candidate_name = name.to_string();
+    let mut index = 0u32;
+    loop {
+        let candidate = dir.join(format!("{candidate_name}.{extension}"));
+        if !candidate.exists() && !set.contains(&candidate) {
+            set.insert(candidate.clone());
+            return (candidate, candidate_name);
+        }
+        index += 1;
+        candidate_name = format!("{name} ({index})");
+    }
+}
+
+async fn release_path(reserved: &ReservedPaths, path: &Path) {
+    reserved.lock().await.remove(path);
 }
 
 /// Shared entry point for starting a segmented download. Used by both the
@@ -944,7 +1044,29 @@ pub async fn begin_download(
     app: &AppHandle,
     manager: &DownloadManager,
     request: StartRequest,
-) -> Result<(), String> {
+    force: bool,
+) -> Result<(), StartError> {
+    // Active-URL deduplication, shared by the UI and the extension. Actively
+    // downloading URLs always block; paused URLs block unless the caller
+    // explicitly requests another copy (`force`). Completed and errored
+    // records never block.
+    {
+        let downloads = manager.downloads.lock().await;
+        for d in downloads.values() {
+            if d.url == request.url {
+                match *d.status.lock().await {
+                    DownloadStatus::Downloading | DownloadStatus::Queued => {
+                        return Err(StartError::DuplicateActive)
+                    }
+                    DownloadStatus::Paused if !force => {
+                        return Err(StartError::DuplicatePaused)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let download_dir = if request.download_dir.trim().is_empty() {
         app.path()
             .download_dir()
@@ -954,7 +1076,13 @@ pub async fn begin_download(
     } else {
         PathBuf::from(&request.download_dir)
     };
-    let file_path = download_dir.join(format!("{}.{}", request.name, request.extension));
+    let (file_path, _final_name) = reserve_path(
+        &download_dir,
+        &request.name,
+        &request.extension,
+        &manager.reserved_paths,
+    )
+    .await;
     let max_conn = manager.max_conn.load(Ordering::Relaxed).max(1);
 
     let dl = Arc::new(ActiveDownload {
@@ -975,6 +1103,7 @@ pub async fn begin_download(
         conn_pool: manager.conn_pool.clone(),
         run_lock: Mutex::new(()),
         generation: AtomicU64::new(0),
+        reserved: manager.reserved_paths.clone(),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -1049,6 +1178,7 @@ pub async fn cancel_active(manager: &DownloadManager, id: &str) {
     if let Some(dl) = manager.downloads.lock().await.remove(id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
         let _ = tokio::fs::remove_file(&dl.file_path).await;
+        release_path(&manager.reserved_paths, &dl.file_path).await;
     }
     persist::delete_state(&state_path(manager, id)).await;
     if let Some(pool) = &manager.hist {
@@ -1069,6 +1199,7 @@ pub async fn remove_download(
     if let Some(dl) = manager.downloads.lock().await.remove(&id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
         let _ = tokio::fs::remove_file(&dl.file_path).await;
+        release_path(&manager.reserved_paths, &dl.file_path).await;
         persist::delete_state(&state_path(&manager, &id)).await;
     } else {
         // Might be a history entry only — still clear any orphaned file/state.
@@ -1161,8 +1292,12 @@ pub async fn list_downloads(
             conn_pool: manager.conn_pool.clone(),
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
+            reserved: manager.reserved_paths.clone(),
         });
         if try_restore(&dl, &manager.resume_dir).await {
+            // Re-claim the destination path so new downloads don't collide
+            // with this resumed one.
+            manager.reserved_paths.lock().await.insert(dl.file_path.clone());
             let id = dl.id.clone();
             active.insert(id.clone(), dl.clone());
             let client = manager.client.clone();
@@ -1433,6 +1568,7 @@ mod tests {
             conn_pool: Arc::new(Semaphore::new(4)),
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
         });
 
         let client = reqwest::Client::new();
@@ -1496,6 +1632,7 @@ mod tests {
             conn_pool: Arc::new(Semaphore::new(2)),
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
         });
 
         let client = reqwest::Client::new();
@@ -1570,6 +1707,7 @@ mod tests {
             conn_pool: Arc::new(Semaphore::new(4)),
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
         });
 
         let client = reqwest::Client::new();
@@ -1581,5 +1719,47 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn reserve_path_uniquifies_on_disk_and_reserved() {
+        let dir = std::env::temp_dir().join(format!("velox-reserve-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let reserved: ReservedPaths = Arc::new(Mutex::new(HashSet::new()));
+
+        let (p0, n0) = reserve_path(&dir, "file", "bin", &reserved).await;
+        assert_eq!(n0, "file");
+        let (p1, n1) = reserve_path(&dir, "file", "bin", &reserved).await;
+        assert_eq!(n1, "file (1)");
+        assert_ne!(p0, p1);
+
+        // A file on disk forces a suffix even without an active reservation.
+        tokio::fs::write(&p0, b"x").await.unwrap();
+        let (_, n2) = reserve_path(&dir, "file", "bin", &reserved).await;
+        assert_eq!(n2, "file (2)");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reserve_path_is_atomic_under_concurrency() {
+        let dir = std::env::temp_dir().join(format!("velox-reserve-c-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let reserved: ReservedPaths = Arc::new(Mutex::new(HashSet::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let d = dir.clone();
+            let r = reserved.clone();
+            handles.push(tokio::spawn(async move { reserve_path(&d, "f", "bin", &r).await.0 }));
+        }
+        let mut paths = Vec::new();
+        for h in handles {
+            paths.push(h.await.unwrap());
+        }
+        let unique: HashSet<PathBuf> = paths.iter().cloned().collect();
+        assert_eq!(unique.len(), 8);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

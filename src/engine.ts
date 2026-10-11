@@ -84,6 +84,11 @@ export function startDownload(req: StartRequest): Promise<void> {
   return invoke("start_download", { request: req });
 }
 
+/// Start an explicit additional copy, bypassing paused-URL deduplication.
+export function startDownloadCopy(req: StartRequest): Promise<void> {
+  return invoke("start_download_copy", { request: req });
+}
+
 export function pauseDownload(id: string): Promise<void> {
   return invoke("pause_download", { id });
 }
