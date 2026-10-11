@@ -21,6 +21,8 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub mod kind {
     pub const HELLO: &str = "hello";
     pub const READY: &str = "ready";
+    pub const PING: &str = "ping";
+    pub const PONG: &str = "pong";
     pub const DOWNLOAD_REQUEST: &str = "download_request";
     pub const DOWNLOAD_ACCEPTED: &str = "download_accepted";
     pub const DOWNLOAD_REJECTED: &str = "download_rejected";
@@ -57,6 +59,7 @@ impl<T> Envelope<T> {
 #[serde(rename_all = "camelCase")]
 pub struct HelloPayload {
     pub ext_version: String,
+    pub client_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

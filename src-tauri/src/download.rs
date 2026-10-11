@@ -971,8 +971,6 @@ pub enum StartError {
     DuplicateActive,
     /// The same URL exists but is paused.
     DuplicatePaused,
-    /// Any other failure.
-    Other(String),
 }
 
 impl StartError {
@@ -980,7 +978,6 @@ impl StartError {
         match self {
             StartError::DuplicateActive => "ALREADY_DOWNLOADING",
             StartError::DuplicatePaused => "ALREADY_PAUSED",
-            StartError::Other(_) => "START_FAILED",
         }
     }
 
@@ -991,7 +988,6 @@ impl StartError {
                 "This download is paused in Velox. Resume it there, or download another copy."
                     .to_string()
             }
-            StartError::Other(m) => m.clone(),
         }
     }
 

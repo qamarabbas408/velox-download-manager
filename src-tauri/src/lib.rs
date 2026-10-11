@@ -3,6 +3,7 @@ mod download;
 mod history;
 mod persist;
 
+use browser_host::ping_browser;
 use download::{cancel_download, get_history, list_downloads, missing_files, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, start_download_copy, DownloadManager};
 use serde::Serialize;
 use tauri::Manager;
@@ -87,7 +88,9 @@ pub fn run() {
             let db_path = data_dir.join("downloads.sqlite");
             let hist = tauri::async_runtime::block_on(history::open_pool(&db_path)).ok();
             app.manage(DownloadManager::new(resume_dir, hist));
-            browser_host::spawn(app.handle().clone());
+            let clients = std::sync::Arc::new(browser_host::BrowserClients::new());
+            app.manage(clients.clone());
+            browser_host::spawn(app.handle().clone(), clients);
 
             // Distinguish dev builds from the installed production app.
             #[cfg(debug_assertions)]
@@ -112,6 +115,7 @@ pub fn run() {
             get_history,
             missing_files,
             set_max_connections,
+            ping_browser,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -10,6 +10,8 @@ export interface Envelope<T = unknown> {
 export const MessageType = {
   HELLO: "hello",
   READY: "ready",
+  PING: "ping",
+  PONG: "pong",
   DOWNLOAD_REQUEST: "download_request",
   DOWNLOAD_ACCEPTED: "download_accepted",
   DOWNLOAD_REJECTED: "download_rejected",
@@ -42,6 +44,7 @@ export const MAX_UNACKED_BYTES = 4 * 1024 * 1024;
 
 export interface HelloPayload {
   extVersion: string;
+  clientId: string;
 }
 
 export interface ReadyPayload {
@@ -113,6 +116,7 @@ export interface ErrorPayload {
 export interface StatusResponse {
   connected: boolean;
   lastError: string | null;
+  clientId: string;
 }
 
 export class VeloxError extends Error {

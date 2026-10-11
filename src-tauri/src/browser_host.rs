@@ -13,52 +13,136 @@
 //! - Pausing is distinct from cancelling: pause keeps the partial file and
 //!   resume state so the transfer can continue later.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::download::{begin_download, cancel_active, probe_impl, DownloadManager, StartRequest};
 use velox_protocol::{
-    kind, CancelDownloadPayload, DownloadRequestPayload, ErrorPayload, Envelope, ReadyPayload,
-    PROTOCOL_VERSION,
+    kind, CancelDownloadPayload, DownloadRequestPayload, Envelope, HelloPayload, PROTOCOL_VERSION,
 };
 
 /// Default number of segments for browser-submitted downloads.
 const DEFAULT_SEGMENTS: usize = 8;
+/// Outbound queue depth per connection.
+const OUTBOUND_QUEUE: usize = 64;
+
+type Tx = mpsc::Sender<Envelope>;
+
+/// Registry of connected extension clients, keyed by the client id the
+/// extension reports in its `hello`. Used to push messages (e.g. assist
+/// requests) to the correct browser profile.
+#[derive(Default)]
+pub struct BrowserClients(pub Mutex<HashMap<String, Tx>>);
+
+impl BrowserClients {
+    pub fn new() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
+
+    /// Register a client connection. A newer connection with the same id
+    /// replaces the previous registration.
+    pub async fn register(&self, client_id: String, tx: Tx) {
+        self.0.lock().await.insert(client_id, tx);
+    }
+
+    /// Remove a client registration, but only if it still belongs to this
+    /// connection. This prevents a closing connection from evicting a newer
+    /// registration that reused the same client id.
+    pub async fn unregister(&self, client_id: &str, tx: &Tx) {
+        let mut reg = self.0.lock().await;
+        if let Some(existing) = reg.get(client_id) {
+            if existing.same_channel(tx) {
+                reg.remove(client_id);
+            }
+        }
+    }
+
+    /// Send a message to a specific connected client. Returns a clear error if
+    /// the client is unknown or its connection has closed.
+    pub async fn send_to(&self, client_id: &str, env: Envelope) -> Result<(), String> {
+        let tx = self.0.lock().await.get(client_id).cloned();
+        match tx {
+            Some(tx) => tx
+                .send(env)
+                .await
+                .map_err(|_| format!("client {client_id} disconnected")),
+            None => Err(format!("client {client_id} is not connected")),
+        }
+    }
+}
 
 /// Start the IPC host on a background runtime task.
-pub fn spawn(app: AppHandle) {
+pub fn spawn(app: AppHandle, clients: Arc<BrowserClients>) {
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = serve(app).await {
+        if let Err(e) = serve(app, clients).await {
             eprintln!("velox browser host: {e}");
         }
     });
 }
 
-fn new_download_id() -> String {
+fn new_id(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("br-{nanos:x}")
+    format!("{prefix}-{nanos:x}")
 }
 
-async fn handle_conn<S>(app: AppHandle, stream: S)
+fn new_download_id() -> String {
+    new_id("br")
+}
+
+async fn reply(
+    tx: &Tx,
+    id: &str,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<(), ()> {
+    let env = Envelope::new(id, kind, payload);
+    tx.send(env).await.map_err(|_| ())
+}
+
+async fn reply_error(tx: &Tx, id: &str, code: &str, message: &str) -> Result<(), ()> {
+    reply(
+        tx,
+        id,
+        kind::ERROR,
+        serde_json::json!({ "code": code, "message": message }),
+    )
+    .await
+}
+
+async fn handle_conn<S>(app: AppHandle, clients: Arc<BrowserClients>, stream: S)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, writer) = tokio::io::split(stream);
+    let (tx, mut rx) = mpsc::channel::<Envelope>(OUTBOUND_QUEUE);
+
+    // Single writer task serializes all outbound messages for this connection.
+    let writer_task = tauri::async_runtime::spawn(async move {
+        let mut writer = writer;
+        while let Some(env) = rx.recv().await {
+            if velox_protocol::write_envelope(&mut writer, &env).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let mut seen: HashSet<String> = HashSet::new();
+    let mut client_id: Option<String> = None;
+
     loop {
         match velox_protocol::read_envelope(&mut reader).await {
             Ok(Some(env)) => {
-                // Reject duplicate request ids on a connection instead of
-                // processing the same request twice.
                 if !seen.insert(env.id.clone()) {
                     let _ = reply_error(
-                        &mut writer,
+                        &tx,
                         &env.id,
                         "DUPLICATE_REQUEST",
                         "A request with this id was already processed",
@@ -66,127 +150,184 @@ where
                     .await;
                     continue;
                 }
-                if dispatch(&app, &mut writer, env).await.is_err() {
-                    break;
+                if env.version != PROTOCOL_VERSION {
+                    let _ = reply_error(
+                        &tx,
+                        &env.id,
+                        "UNSUPPORTED_VERSION",
+                        &format!(
+                            "Unsupported protocol version {} (expected {})",
+                            env.version, PROTOCOL_VERSION
+                        ),
+                    )
+                    .await;
+                    continue;
                 }
+                handle_message(&app, &clients, &tx, env, &mut client_id).await;
             }
             Ok(None) => break,
             Err(_) => break,
         }
     }
-}
 
-async fn reply<W, T>(writer: &mut W, id: &str, kind: &str, payload: T) -> std::io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-    T: serde::Serialize,
-{
-    let env = Envelope::new(id, kind, payload);
-    velox_protocol::write_envelope(writer, &env).await
-}
-
-async fn reply_error<W>(
-    writer: &mut W,
-    id: &str,
-    code: &str,
-    message: &str,
-) -> std::io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    reply(writer, id, kind::ERROR, ErrorPayload::new(code, message)).await
-}
-
-async fn dispatch<W>(app: &AppHandle, writer: &mut W, env: Envelope) -> std::io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    if env.version != PROTOCOL_VERSION {
-        return reply_error(
-            writer,
-            &env.id,
-            "UNSUPPORTED_VERSION",
-            &format!(
-                "Unsupported protocol version {} (expected {})",
-                env.version, PROTOCOL_VERSION
-            ),
-        )
-        .await;
+    // Cleanup: drop the registry entry; the writer task ends when tx drops.
+    if let Some(id) = client_id {
+        clients.unregister(&id, &tx).await;
     }
+    drop(tx);
+    let _ = writer_task.await;
+}
 
+async fn handle_message(
+    app: &AppHandle,
+    clients: &Arc<BrowserClients>,
+    tx: &Tx,
+    env: Envelope,
+    client_id: &mut Option<String>,
+) {
     match env.kind.as_str() {
         kind::HELLO => {
-            let ready = ReadyPayload {
-                app_version: app.package_info().version.to_string(),
-                capabilities: vec!["download".to_string()],
-            };
-            reply(writer, &env.id, kind::READY, ready).await
-        }
-        kind::DOWNLOAD_REQUEST => {
-            let payload: DownloadRequestPayload = match velox_protocol::decode(&env) {
-                Ok(p) => p,
+            let hello: HelloPayload = match velox_protocol::decode(&env) {
+                Ok(h) => h,
                 Err(_) => {
-                    return reply_error(writer, &env.id, "INVALID_REQUEST", "Malformed download request")
-                        .await
+                    let _ = reply_error(tx, &env.id, "INVALID_REQUEST", "Malformed hello").await;
+                    return;
                 }
             };
+            *client_id = Some(hello.client_id.clone());
+            clients.register(hello.client_id.clone(), tx.clone()).await;
 
-            let manager = app.state::<DownloadManager>();
-            match probe_impl(&manager.client, &payload.url).await {
-                Ok(probe) => {
-                    let id = new_download_id();
-                    let request = StartRequest {
-                        id: id.clone(),
-                        url: probe.url,
-                        name: probe.name,
-                        extension: probe.extension,
-                        size_bytes: probe.size_bytes,
-                        download_dir: String::new(),
-                        range_supported: probe.range_supported,
-                        segments: DEFAULT_SEGMENTS,
-                    };
-                    match begin_download(app, manager.inner(), request, false).await {
-                        Ok(()) => {
-                            reply(
-                                writer,
-                                &env.id,
-                                kind::DOWNLOAD_ACCEPTED,
-                                serde_json::json!({ "downloadId": id }),
-                            )
-                            .await
-                        }
-                        Err(e) => {
-                            reply_error(writer, &env.id, e.code(), &e.message()).await
-                        }
-                    }
-                }
-                Err(e) => reply_error(writer, &env.id, "PROBE_FAILED", &e).await,
-            }
+            let _ = reply(
+                tx,
+                &env.id,
+                kind::READY,
+                serde_json::json!({
+                    "appVersion": app.package_info().version.to_string(),
+                    "capabilities": ["download", "assist", "ping"],
+                }),
+            )
+            .await;
+
+            // M1 connectivity probe: push a ping; the extension replies pong.
+            let _ = reply(tx, &new_id("ping"), kind::PING, serde_json::json!({})).await;
+        }
+        kind::PING => {
+            let _ = reply(tx, &env.id, kind::PONG, serde_json::json!({})).await;
+        }
+        kind::PONG => {
+            eprintln!("velox browser host: pong from client {:?}", client_id);
         }
         kind::CANCEL_DOWNLOAD => {
             let payload: CancelDownloadPayload = match velox_protocol::decode(&env) {
                 Ok(p) => p,
                 Err(_) => {
-                    return reply_error(writer, &env.id, "INVALID_REQUEST", "Malformed cancel request")
-                        .await
+                    let _ =
+                        reply_error(tx, &env.id, "INVALID_REQUEST", "Malformed cancel request").await;
+                    return;
                 }
             };
             let manager = app.state::<DownloadManager>();
             cancel_active(manager.inner(), &payload.download_id).await;
-            reply(
-                writer,
+            let _ = reply(
+                tx,
                 &env.id,
                 kind::CANCEL_DOWNLOAD,
                 serde_json::json!({ "downloadId": payload.download_id, "cancelled": true }),
             )
-            .await
+            .await;
         }
-        _ => reply_error(writer, &env.id, "UNSUPPORTED", "Unknown message type").await,
+        kind::DOWNLOAD_REQUEST => {
+            // Heavy: probe + start. Handle off the reader loop so the
+            // connection stays responsive (needed for streaming later).
+            let app = app.clone();
+            let tx = tx.clone();
+            tauri::async_runtime::spawn(async move {
+                handle_download_request(app, tx, env).await;
+            });
+        }
+        _ => {
+            let _ = reply_error(tx, &env.id, "UNSUPPORTED", "Unknown message type").await;
+        }
     }
 }
 
+async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope) {
+    let payload: DownloadRequestPayload = match velox_protocol::decode(&env) {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = reply_error(&tx, &env.id, "INVALID_REQUEST", "Malformed download request").await;
+            return;
+        }
+    };
+
+    let manager = app.state::<DownloadManager>();
+    match probe_impl(&manager.client, &payload.url).await {
+        Ok(probe) => {
+            let id = new_download_id();
+            let request = StartRequest {
+                id: id.clone(),
+                url: probe.url,
+                name: probe.name,
+                extension: probe.extension,
+                size_bytes: probe.size_bytes,
+                download_dir: String::new(),
+                range_supported: probe.range_supported,
+                segments: DEFAULT_SEGMENTS,
+            };
+            match begin_download(&app, manager.inner(), request, false).await {
+                Ok(()) => {
+                    let _ = reply(
+                        &tx,
+                        &env.id,
+                        kind::DOWNLOAD_ACCEPTED,
+                        serde_json::json!({ "downloadId": id }),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    let _ = reply_error(&tx, &env.id, e.code(), &e.message()).await;
+                }
+            }
+        }
+        Err(e) => {
+            let _ = reply_error(&tx, &env.id, "PROBE_FAILED", &e).await;
+        }
+    }
+}
+
+/// Push a ping to one or all connected extension clients (M1 test helper).
+#[tauri::command]
+pub async fn ping_browser(
+    clients: tauri::State<'_, Arc<BrowserClients>>,
+    client_id: Option<String>,
+) -> Result<u32, String> {
+    let clients = clients.inner().clone();
+
+    if let Some(id) = client_id {
+        let env = Envelope::new(new_id("ping"), kind::PING, serde_json::json!({}));
+        clients.send_to(&id, env).await?;
+        return Ok(1);
+    }
+
+    // Snapshot senders so we don't hold the registry lock across awaits.
+    let targets: Vec<(String, Tx)> = {
+        let reg = clients.0.lock().await;
+        reg.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
+    let mut sent = 0u32;
+    for (id, tx) in targets {
+        let env = Envelope::new(new_id("ping"), kind::PING, serde_json::json!({}));
+        if tx.send(env).await.is_ok() {
+            sent += 1;
+        } else {
+            clients.unregister(&id, &tx).await;
+        }
+    }
+    Ok(sent)
+}
+
 #[cfg(unix)]
-async fn serve(app: AppHandle) -> std::io::Result<()> {
+async fn serve(app: AppHandle, clients: Arc<BrowserClients>) -> std::io::Result<()> {
     use std::path::Path;
 
     let endpoint = velox_protocol::endpoint();
@@ -199,12 +340,13 @@ async fn serve(app: AppHandle) -> std::io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let app = app.clone();
-        tauri::async_runtime::spawn(async move { handle_conn(app, stream).await });
+        let clients = clients.clone();
+        tauri::async_runtime::spawn(async move { handle_conn(app, clients, stream).await });
     }
 }
 
 #[cfg(windows)]
-async fn serve(app: AppHandle) -> std::io::Result<()> {
+async fn serve(app: AppHandle, clients: Arc<BrowserClients>) -> std::io::Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let endpoint = velox_protocol::endpoint();
@@ -212,6 +354,6 @@ async fn serve(app: AppHandle) -> std::io::Result<()> {
         let server = ServerOptions::new().create(&endpoint)?;
         server.connect().await?;
         // Handle sequentially: a single extension port is expected for v1.
-        handle_conn(app.clone(), server).await;
+        handle_conn(app.clone(), clients.clone(), server).await;
     }
 }

@@ -256,3 +256,13 @@ body {
 .toggle input {
   accent-color: rgb(var(--signal));
 }
+
+.popup__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: rgb(var(--dim));
+  padding-top: 8px;
+  border-top: 1px solid rgb(var(--line));
+}

@@ -8,15 +8,20 @@ export default function App() {
   const [status, setStatus] = useState<StatusResponse>({
     connected: false,
     lastError: null,
+    clientId: "",
   });
   const [assist, setAssist] = useState(true);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
+  const [lastPing, setLastPing] = useState<number | null>(null);
 
   const refresh = () => {
     chrome.runtime.sendMessage({ type: "velox:getStatus" }, (res?: StatusResponse) => {
       if (res) setStatus(res);
     });
+    chrome.storage.local.get({ lastPing: 0 }, (v) =>
+      setLastPing((v.lastPing as number) || null)
+    );
   };
 
   useEffect(() => {
@@ -103,6 +108,11 @@ export default function App() {
         <input type="checkbox" checked={assist} onChange={toggleAssist} />
         <span>Browser assistance for protected sites</span>
       </label>
+
+      <div className="popup__footer">
+        <span>Browser link</span>
+        <span>{lastPing ? new Date(lastPing).toLocaleTimeString() : "—"}</span>
+      </div>
     </div>
   );
 }

@@ -11,6 +11,15 @@ import type {
 
 const HOST_NAME = "com.velox.native_host";
 
+/** Stable per-service-worker identity, reported to Velox in `hello`. */
+const CLIENT_ID = (() => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return Math.random().toString(36).slice(2);
+  }
+})();
+
 export const REQUEST_TIMEOUT_MS = 8000;
 export const HANDSHAKE_TIMEOUT_MS = 4000;
 /** After a disconnect, fail fast for a short window instead of reconnecting. */
@@ -95,6 +104,15 @@ function ensurePort(): chrome.runtime.Port {
     }
 
     // Unsolicited / late responses (e.g. arriving after a timeout) are ignored.
+    if (msg.type === MessageType.PING) {
+      try {
+        next.postMessage(envelope(msg.id, MessageType.PONG, { clientId: CLIENT_ID }));
+        chrome.storage.local.set({ lastPing: Date.now() });
+      } catch {
+        // ignore
+      }
+      return;
+    }
     if (msg.type === MessageType.READY) {
       connected = true;
       lastError = null;
@@ -150,7 +168,10 @@ function sendRequest(
 
 export function handshake(): void {
   if (port || (disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS)) return;
-  const hello: HelloPayload = { extVersion: chrome.runtime.getManifest().version };
+  const hello: HelloPayload = {
+    extVersion: chrome.runtime.getManifest().version,
+    clientId: CLIENT_ID,
+  };
   sendRequest(MessageType.HELLO, hello, {
     timeoutMs: HANDSHAKE_TIMEOUT_MS,
     expect: MessageType.READY,
@@ -192,7 +213,7 @@ export async function submit(
 }
 
 export function status(): StatusResponse {
-  return { connected, lastError };
+  return { connected, lastError, clientId: CLIENT_ID };
 }
 
 /** Reset module state. Test-only. */
