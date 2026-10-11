@@ -22,6 +22,8 @@ const MAX_SEGMENT_RETRIES: u32 = 12;
 const RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Maximum time to wait for a chunk before considering the connection stalled.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_CONN: usize = 32;
 
 #[derive(Debug)]
@@ -131,6 +133,11 @@ pub struct ActiveDownload {
     pub speed: AtomicU64,
     pub last_state_flush: Mutex<Instant>,
     pub conn_pool: Arc<Semaphore>,
+    /// Serializes runs for the same download so a resumed run cannot start
+    /// until any previous run has fully stopped touching the file.
+    pub run_lock: Mutex<()>,
+    /// Incremented on each (re)start; a run whose generation is stale exits.
+    pub generation: AtomicU64,
 }
 
 pub struct DownloadManager {
@@ -404,6 +411,16 @@ async fn update_segment_current(dl: &ActiveDownload, index: usize, current: u64)
     }
 }
 
+/// Reset every unfinished segment to `idle` so it will be rescheduled. Called
+/// whenever a run stops without completing (pause, error, supersede).
+async fn reset_unfinished_segments(dl: &ActiveDownload) {
+    for s in dl.segments.lock().await.iter_mut() {
+        if s.state != "done" {
+            s.state = "idle";
+        }
+    }
+}
+
 async fn aggregate(dl: &ActiveDownload) -> (u64, bool) {
     let segs = dl.segments.lock().await;
     let downloaded = segs
@@ -650,8 +667,8 @@ async fn run_segment_inner(
         if !unbounded && current >= end {
             break;
         }
-        match stream.next().await {
-            Some(Ok(chunk)) => {
+        match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
                 let n = if unbounded {
                     chunk.len()
                 } else {
@@ -666,8 +683,21 @@ async fn run_segment_inner(
                 current += n as u64;
                 update_segment_current(&dl, seg.index, current).await;
             }
-            Some(Err(e)) => return Err(SegmentError::transient(format!("stream error: {e}"))),
-            None => break,
+            Ok(Some(Err(e))) => return Err(SegmentError::transient(format!("stream error: {e}"))),
+            Ok(None) => break,
+            Err(_) => {
+                // No chunk arrived within the stall window. Treat a genuine
+                // stall as transient so it can be retried, but distinguish it
+                // from a slow-but-progressing connection (each received chunk
+                // resets the timer).
+                if dl.pause_flag.load(Ordering::Relaxed) || dl.cancel_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                return Err(SegmentError::transient(format!(
+                    "connection stalled (no data for {}s)",
+                    STALL_TIMEOUT.as_secs()
+                )));
+            }
         }
     }
 
@@ -697,9 +727,20 @@ async fn run_download_inner(
     resume_dir: &std::path::Path,
     hist: Option<&history::HistoryPool>,
 ) {
+    let my_gen = dl.generation.load(Ordering::Relaxed);
+    // Serialize runs per download: a resumed run waits here until any previous
+    // run has fully stopped before touching the file or segments.
+    let _run_guard = dl.run_lock.lock().await;
+    if dl.generation.load(Ordering::Relaxed) != my_gen {
+        return;
+    }
+
     {
         let segs = dl.segments.lock().await;
-        let fresh = segs.is_empty();
+        // Re-download from scratch when the server can't serve byte ranges: a
+        // partial "resume" would issue a Range request the server ignores,
+        // corrupting the file. Range-capable downloads still resume.
+        let fresh = segs.is_empty() || !dl.range_supported;
         drop(segs);
         if fresh {
             // Always create the target file. When the size is known we preallocate;
@@ -733,6 +774,14 @@ async fn run_download_inner(
     loop {
         if dl.cancel_flag.load(Ordering::Relaxed) {
             break;
+        }
+        if dl.generation.load(Ordering::Relaxed) != my_gen {
+            // Superseded by a newer run (e.g. pause+resume raced). Stop fully
+            // so the new run owns the download and the file.
+            join.abort_all();
+            while join.join_next().await.is_some() {}
+            reset_unfinished_segments(&dl).await;
+            return;
         }
 
         let pending: Vec<SegmentState> = {
@@ -780,6 +829,8 @@ async fn run_download_inner(
 
                 if *dl.status.lock().await == DownloadStatus::Error {
                     join.abort_all();
+                    while join.join_next().await.is_some() {}
+                    reset_unfinished_segments(&dl).await;
                     write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
@@ -788,12 +839,9 @@ async fn run_download_inner(
                 }
                 if dl.pause_flag.load(Ordering::Relaxed) {
                     join.abort_all();
+                    while join.join_next().await.is_some() {}
                     *dl.status.lock().await = DownloadStatus::Paused;
-                    for s in dl.segments.lock().await.iter_mut() {
-                        if s.current < s.end {
-                            s.state = "idle";
-                        }
-                    }
+                    reset_unfinished_segments(&dl).await;
                     // Flush final offsets on pause even if under the interval.
                     persist_state_quiet(resume_dir, &dl).await;
                     write_history(hist, &dl).await;
@@ -838,7 +886,22 @@ async fn run_download_inner(
                         *dl.status.lock().await = DownloadStatus::Error;
                         write_history(hist, &dl).await;
                     } else {
-                        set_segment_state(&dl, index, "idle").await;
+                        if dl.range_supported {
+                            set_segment_state(&dl, index, "idle").await;
+                        } else {
+                            // Range-less servers can't resume a segment, so
+                            // restart it from the beginning (truncating the
+                            // file) instead of appending at the failed offset.
+                            if let Some(s) = dl.segments.lock().await.iter_mut().find(|s| s.index == index) {
+                                s.current = s.start;
+                                s.state = "idle";
+                            }
+                            if let Ok(f) = File::create(&dl.file_path).await {
+                                if dl.total_size > 0 {
+                                    let _ = f.set_len(dl.total_size).await;
+                                }
+                            }
+                        }
                         let backoff = RETRY_BACKOFF * (1u32 << attempts.min(4));
                         tokio::time::sleep(backoff).await;
                         if let Some(app) = app {
@@ -851,6 +914,7 @@ async fn run_download_inner(
     }
 
     join.abort_all();
+    while join.join_next().await.is_some() {}
     if dl.cancel_flag.load(Ordering::Relaxed) {
         return;
     }
@@ -909,6 +973,8 @@ pub async fn begin_download(
         speed: AtomicU64::new(0),
         last_state_flush: Mutex::new(Instant::now()),
         conn_pool: manager.conn_pool.clone(),
+        run_lock: Mutex::new(()),
+        generation: AtomicU64::new(0),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -957,6 +1023,9 @@ pub async fn resume_download(
     dl.cancel_flag.store(false, Ordering::Relaxed);
     dl.retries.lock().await.clear();
     *dl.last_error.lock().await = None;
+    // Supersede any in-flight run for this download; it will stop and release
+    // the run lock before this new run touches the file.
+    dl.generation.fetch_add(1, Ordering::Relaxed);
     let client = manager.client.clone();
     let resume_dir = manager.resume_dir.clone();
     let hist = manager.hist.clone();
@@ -969,21 +1038,22 @@ pub async fn cancel_download(
     manager: State<'_, DownloadManager>,
     id: String,
 ) -> Result<(), String> {
-    let dl = manager
-        .downloads
-        .lock()
-        .await
-        .get(&id)
-        .cloned()
-        .ok_or("download not found")?;
-    dl.cancel_flag.store(true, Ordering::Relaxed);
-    let _ = tokio::fs::remove_file(&dl.file_path).await;
-    persist::delete_state(&state_path(&manager, &id)).await;
-    if let Some(pool) = &manager.hist {
-        let _ = history::delete_history(pool, &id).await;
-    }
-    manager.downloads.lock().await.remove(&id);
+    cancel_active(manager.inner(), &id).await;
     Ok(())
+}
+
+/// Cancel an active download: stop it, delete the partial file, drop any resume
+/// state, and remove the history row. Shared by the `cancel_download` command
+/// and the browser-integration host.
+pub async fn cancel_active(manager: &DownloadManager, id: &str) {
+    if let Some(dl) = manager.downloads.lock().await.remove(id) {
+        dl.cancel_flag.store(true, Ordering::Relaxed);
+        let _ = tokio::fs::remove_file(&dl.file_path).await;
+    }
+    persist::delete_state(&state_path(manager, id)).await;
+    if let Some(pool) = &manager.hist {
+        let _ = history::delete_history(pool, id).await;
+    }
 }
 
 // Remove a download from the list entirely — whether it is currently active or
@@ -1089,6 +1159,8 @@ pub async fn list_downloads(
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: manager.conn_pool.clone(),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             let id = dl.id.clone();
@@ -1359,6 +1431,8 @@ mod tests {
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         });
 
         let client = reqwest::Client::new();
@@ -1420,6 +1494,8 @@ mod tests {
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: Arc::new(Semaphore::new(2)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         });
 
         let client = reqwest::Client::new();
@@ -1492,6 +1568,8 @@ mod tests {
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         });
 
         let client = reqwest::Client::new();

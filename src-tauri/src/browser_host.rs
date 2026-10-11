@@ -4,12 +4,25 @@
 //! Windows) that the stateless native-messaging shim connects to. The shim
 //! forwards Chrome's Native Messaging frames verbatim, so this module speaks
 //! the same length-prefixed JSON protocol (see the `velox-protocol` crate).
+//!
+//! Cancellation semantics:
+//! - `cancel_download` (extension -> app) stops the transfer, deletes the
+//!   partial file, resume state, and history row.
+//! - Disconnecting the extension does NOT cancel an in-flight download; the
+//!   app owns the transfer and it continues to completion.
+//! - Pausing is distinct from cancelling: pause keeps the partial file and
+//!   resume state so the transfer can continue later.
+
+use std::collections::HashSet;
 
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::download::{begin_download, probe_impl, DownloadManager, StartRequest};
-use velox_protocol::{kind, DownloadRequestPayload, ErrorPayload, Envelope, ReadyPayload};
+use crate::download::{begin_download, cancel_active, probe_impl, DownloadManager, StartRequest};
+use velox_protocol::{
+    kind, CancelDownloadPayload, DownloadRequestPayload, ErrorPayload, Envelope, ReadyPayload,
+    PROTOCOL_VERSION,
+};
 
 /// Default number of segments for browser-submitted downloads.
 const DEFAULT_SEGMENTS: usize = 8;
@@ -37,9 +50,22 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
+    let mut seen: HashSet<String> = HashSet::new();
     loop {
         match velox_protocol::read_envelope(&mut reader).await {
             Ok(Some(env)) => {
+                // Reject duplicate request ids on a connection instead of
+                // processing the same request twice.
+                if !seen.insert(env.id.clone()) {
+                    let _ = reply_error(
+                        &mut writer,
+                        &env.id,
+                        "DUPLICATE_REQUEST",
+                        "A request with this id was already processed",
+                    )
+                    .await;
+                    continue;
+                }
                 if dispatch(&app, &mut writer, env).await.is_err() {
                     break;
                 }
@@ -75,6 +101,19 @@ async fn dispatch<W>(app: &AppHandle, writer: &mut W, env: Envelope) -> std::io:
 where
     W: AsyncWrite + Unpin,
 {
+    if env.version != PROTOCOL_VERSION {
+        return reply_error(
+            writer,
+            &env.id,
+            "UNSUPPORTED_VERSION",
+            &format!(
+                "Unsupported protocol version {} (expected {})",
+                env.version, PROTOCOL_VERSION
+            ),
+        )
+        .await;
+    }
+
     match env.kind.as_str() {
         kind::HELLO => {
             let ready = ReadyPayload {
@@ -121,6 +160,24 @@ where
                 }
                 Err(e) => reply_error(writer, &env.id, "PROBE_FAILED", &e).await,
             }
+        }
+        kind::CANCEL_DOWNLOAD => {
+            let payload: CancelDownloadPayload = match velox_protocol::decode(&env) {
+                Ok(p) => p,
+                Err(_) => {
+                    return reply_error(writer, &env.id, "INVALID_REQUEST", "Malformed cancel request")
+                        .await
+                }
+            };
+            let manager = app.state::<DownloadManager>();
+            cancel_active(manager.inner(), &payload.download_id).await;
+            reply(
+                writer,
+                &env.id,
+                kind::CANCEL_DOWNLOAD,
+                serde_json::json!({ "downloadId": payload.download_id, "cancelled": true }),
+            )
+            .await
         }
         _ => reply_error(writer, &env.id, "UNSUPPORTED", "Unknown message type").await,
     }

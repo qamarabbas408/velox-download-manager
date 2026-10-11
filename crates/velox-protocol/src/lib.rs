@@ -82,6 +82,12 @@ pub struct DownloadRequestPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelDownloadPayload {
+    pub download_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub code: String,
     pub message: String,
