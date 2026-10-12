@@ -38,6 +38,7 @@ export interface EngineProgress {
   speedBytesPerSec: number;
   error?: string | null;
   assistEligible?: boolean;
+  assisted?: boolean;
   segments: EngineSegment[];
 }
 

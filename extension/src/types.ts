@@ -17,6 +17,7 @@ export const MessageType = {
   DOWNLOAD_REJECTED: "download_rejected",
   ASSIST_REQUEST: "assist_request",
   ASSIST_STARTED: "assist_started",
+  ASSIST_FAILED: "assist_failed",
   CHUNK: "chunk",
   CHUNK_ACK: "chunk_ack",
   ASSIST_COMPLETED: "assist_completed",
@@ -88,6 +89,7 @@ export interface AssistStartedPayload {
 
 /** One base64-encoded chunk of browser-fetched data. */
 export interface ChunkPayload {
+  downloadId: string;
   transferId: string;
   seq: number;
   offset: number;
@@ -95,13 +97,22 @@ export interface ChunkPayload {
 }
 
 export interface ChunkAckPayload {
+  downloadId: string;
   transferId: string;
   seq: number;
+  cancelled?: boolean;
 }
 
 export interface AssistCompletedPayload {
   downloadId: string;
   transferId: string;
+}
+
+export interface AssistFailedPayload {
+  downloadId: string;
+  transferId: string;
+  code: string;
+  message: string;
 }
 
 export interface CancelDownloadPayload {

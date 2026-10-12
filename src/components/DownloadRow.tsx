@@ -124,6 +124,11 @@ export function DownloadRow({
                 segmented
               </span>
             )}
+            {item.assisted && !item.missing && (
+              <span className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-signal/15 text-signal" title="Fetched via browser assistance">
+                browser-assisted
+              </span>
+            )}
           </div>
 
           <SegmentedProgressBar

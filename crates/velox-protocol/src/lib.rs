@@ -28,6 +28,7 @@ pub mod kind {
     pub const DOWNLOAD_REJECTED: &str = "download_rejected";
     pub const ASSIST_REQUEST: &str = "assist_request";
     pub const ASSIST_STARTED: &str = "assist_started";
+    pub const ASSIST_FAILED: &str = "assist_failed";
     pub const CHUNK: &str = "chunk";
     pub const CHUNK_ACK: &str = "chunk_ack";
     pub const ASSIST_COMPLETED: &str = "assist_completed";
@@ -98,6 +99,48 @@ pub struct AssistRequestPayload {
     pub url: String,
     pub method: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistStartedPayload {
+    pub download_id: String,
+    pub transfer_id: String,
+}
+
+/// One base64-encoded chunk of browser-fetched data, in arrival order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkPayload {
+    pub download_id: String,
+    pub transfer_id: String,
+    pub seq: u64,
+    pub offset: u64,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkAckPayload {
+    pub download_id: String,
+    pub transfer_id: String,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistCompletedPayload {
+    pub download_id: String,
+    pub transfer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistFailedPayload {
+    pub download_id: String,
+    pub transfer_id: String,
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

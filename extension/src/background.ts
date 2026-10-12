@@ -1,4 +1,15 @@
-import { handshake, status, submit } from "./nativeClient";
+import {
+  handshake,
+  postNative,
+  setAckBridge,
+  setAssistBridge,
+  setCancelBridge,
+  status,
+  submit,
+} from "./nativeClient";
+import { MessageType } from "./types";
+import type { AssistRequestPayload } from "./types";
+import { pageAssistFetch } from "./pageAssistFetch";
 
 const MENU_ID = "velox-download-link";
 
@@ -78,6 +89,146 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   });
 });
 
+// --- Browser assistance (page-context fetch) ---------------------------------
+// Cloudflare managed challenges block service-worker fetches, but a fetch
+// issued from the origin's page context passes. So assist runs a fetch in a
+// tab on the target origin and streams chunks back through the service worker.
+
+interface AssistState {
+  downloadId: string;
+  tabId: number;
+  createdTab: boolean;
+  cancelled: boolean;
+  acks: Map<number, (cancelled: boolean) => void>;
+}
+
+const assistStates = new Map<string, AssistState>();
+
+function sameOrigin(url: string, origin: string): boolean {
+  try {
+    return new URL(url).origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+async function findOrCreateTab(
+  origin: string
+): Promise<{ tabId: number; created: boolean } | null> {
+  const tabs = await chrome.tabs.query({ url: `${origin}/*` });
+  const existing = tabs.find((t) => t.id != null && t.url && sameOrigin(t.url, origin));
+  if (existing?.id != null) return { tabId: existing.id, created: false };
+  const created = await chrome.tabs.create({ url: origin, active: false });
+  return created.id != null ? { tabId: created.id, created: true } : null;
+}
+
+function cleanupAssist(transferId: string): void {
+  const state = assistStates.get(transferId);
+  if (!state) return;
+  if (state.createdTab) {
+    chrome.tabs.remove(state.tabId).catch(() => {});
+  }
+  state.acks.forEach((resolve) => resolve(true));
+  assistStates.delete(transferId);
+}
+
+async function waitForComplete(tabId: number, timeoutMs = 15000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return;
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+async function assistViaPage(req: AssistRequestPayload): Promise<void> {
+  const transferId = `t-${req.downloadId}-${Date.now().toString(36)}`;
+  let origin: string;
+  try {
+    origin = new URL(req.url).origin;
+  } catch {
+    postNative(MessageType.ASSIST_FAILED, {
+      downloadId: req.downloadId,
+      transferId,
+      code: "ASSIST_INVALID_URL",
+      message: "Invalid URL.",
+    });
+    return;
+  }
+
+  let found: { tabId: number; created: boolean } | null = null;
+  try {
+    found = await findOrCreateTab(origin);
+  } catch {
+    found = null;
+  }
+  if (!found) {
+    postNative(MessageType.ASSIST_FAILED, {
+      downloadId: req.downloadId,
+      transferId,
+      code: "ASSIST_NO_TAB",
+      message: `Open ${origin} in a browser tab, then retry.`,
+    });
+    return;
+  }
+
+  assistStates.set(transferId, {
+    downloadId: req.downloadId,
+    tabId: found.tabId,
+    createdTab: found.created,
+    cancelled: false,
+    acks: new Map(),
+  });
+  await waitForComplete(found.tabId);
+
+  chrome.scripting
+    .executeScript({
+      target: { tabId: found.tabId },
+      func: pageAssistFetch,
+      args: [req.url, req.downloadId, transferId],
+    })
+    .catch((e) => {
+      postNative(MessageType.ASSIST_FAILED, {
+        downloadId: req.downloadId,
+        transferId,
+        code: "ASSIST_INJECT_FAILED",
+        message: e instanceof Error ? e.message : String(e),
+      });
+      cleanupAssist(transferId);
+    });
+}
+
+// The page-context fetcher is injected from ./pageAssistFetch.
+
+setAssistBridge((req) => {
+  void assistViaPage(req);
+});
+
+setAckBridge((ack) => {
+  const state = assistStates.get(ack.transferId);
+  if (!state) return;
+  const resolve = state.acks.get(ack.seq);
+  if (resolve) {
+    state.acks.delete(ack.seq);
+    resolve(Boolean(ack.cancelled));
+  }
+  if (ack.cancelled) state.cancelled = true;
+});
+
+setCancelBridge((downloadId) => {
+  for (const state of assistStates.values()) {
+    if (state.downloadId === downloadId) {
+      state.cancelled = true;
+      state.acks.forEach((resolve) => resolve(true));
+      state.acks.clear();
+    }
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg?.type) {
     case "velox:getStatus":
@@ -86,6 +237,62 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     case "velox:submit":
       void submit(msg.url, msg.source ?? "popup", { pageUrl: msg.pageUrl }).then(sendResponse);
       return true;
+    case "velox:assistStarted": {
+      const state = assistStates.get(msg.transferId);
+      if (state?.cancelled) {
+        sendResponse({ cancelled: true });
+        break;
+      }
+      postNative(MessageType.ASSIST_STARTED, {
+        downloadId: msg.downloadId,
+        transferId: msg.transferId,
+      });
+      sendResponse({ ok: true });
+      break;
+    }
+    case "velox:assistChunk": {
+      const state = assistStates.get(msg.transferId);
+      if (!state || state.cancelled) {
+        sendResponse({ cancelled: true });
+        break;
+      }
+      postNative(MessageType.CHUNK, {
+        downloadId: msg.downloadId,
+        transferId: msg.transferId,
+        seq: msg.seq,
+        offset: msg.offset,
+        data: msg.data,
+      });
+      // Hold the response until the app acknowledges this chunk so the page
+      // can't outrun Velox's writes (end-to-end backpressure).
+      const timer = setTimeout(() => {
+        state.acks.delete(msg.seq);
+        sendResponse({ cancelled: true });
+      }, 60000);
+      state.acks.set(msg.seq, (cancelled) => {
+        clearTimeout(timer);
+        sendResponse({ cancelled });
+      });
+      return true;
+    }
+    case "velox:assistCompleted":
+      postNative(MessageType.ASSIST_COMPLETED, {
+        downloadId: msg.downloadId,
+        transferId: msg.transferId,
+      });
+      cleanupAssist(msg.transferId);
+      sendResponse({ ok: true });
+      break;
+    case "velox:assistFailed":
+      postNative(MessageType.ASSIST_FAILED, {
+        downloadId: msg.downloadId,
+        transferId: msg.transferId,
+        code: msg.code,
+        message: msg.message,
+      });
+      cleanupAssist(msg.transferId);
+      sendResponse({ ok: true });
+      break;
     default:
       return false;
   }

@@ -103,6 +103,7 @@ pub struct DownloadProgress {
     pub speed_bytes_per_sec: u64,
     pub error: Option<String>,
     pub assist_eligible: bool,
+    pub assisted: bool,
     pub segments: Vec<SegmentState>,
 }
 
@@ -152,6 +153,12 @@ pub struct ActiveDownload {
     pub assist_eligible: AtomicBool,
     /// The browser client that submitted this download (extension path only).
     pub origin_client: Mutex<Option<String>>,
+    /// Bytes received via browser assistance (not from the native engine).
+    pub external_bytes: AtomicU64,
+    /// True once a download is being fulfilled via browser assistance.
+    pub assisted: AtomicBool,
+    /// The active assisted-transfer id (guards against stale/duplicate chunks).
+    pub assist_transfer: Mutex<Option<String>>,
 }
 
 pub struct DownloadManager {
@@ -467,7 +474,7 @@ async fn aggregate(dl: &ActiveDownload) -> (u64, bool) {
     (downloaded, done)
 }
 
-async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
+pub(crate) async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
     let status = *dl.status.lock().await;
     let segments = dl.segments.lock().await.clone();
     let error = dl.last_error.lock().await.clone();
@@ -501,6 +508,7 @@ async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
             speed_bytes_per_sec: dl.speed.load(Ordering::Relaxed),
             error,
             assist_eligible: dl.assist_eligible.load(Ordering::Relaxed),
+            assisted: dl.assisted.load(Ordering::Relaxed),
             segments,
         },
     );
@@ -1167,6 +1175,9 @@ pub async fn begin_download(
         reserved: manager.reserved_paths.clone(),
         assist_eligible: AtomicBool::new(false),
         origin_client: Mutex::new(None),
+        external_bytes: AtomicU64::new(0),
+        assisted: AtomicBool::new(false),
+        assist_transfer: Mutex::new(None),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -1247,6 +1258,99 @@ pub async fn cancel_active(manager: &DownloadManager, id: &str) {
     if let Some(pool) = &manager.hist {
         let _ = history::delete_history(pool, id).await;
     }
+}
+
+/// Begin a browser-assisted transfer: reset the destination file and mark the
+/// download as downloading. Assisted transfers are not resumable, so any
+/// previous bytes are discarded.
+pub async fn assist_begin(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+) -> Result<(), String> {
+    let dl = manager
+        .downloads
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or("download not found")?;
+    // Truncate the file so a retry never mixes old bytes with new data.
+    let _ = File::create(&dl.file_path).await;
+    dl.external_bytes.store(0, Ordering::Relaxed);
+    dl.assisted.store(true, Ordering::Relaxed);
+    dl.assist_eligible.store(false, Ordering::Relaxed);
+    dl.pause_flag.store(false, Ordering::Relaxed);
+    dl.cancel_flag.store(false, Ordering::Relaxed);
+    *dl.assist_transfer.lock().await = Some(transfer_id.to_string());
+    *dl.last_error.lock().await = None;
+    *dl.status.lock().await = DownloadStatus::Downloading;
+    write_history(manager.hist.as_ref(), &dl).await;
+    emit_progress(app, &dl, 0).await;
+    Ok(())
+}
+
+/// Write one chunk of assisted data at its absolute offset and emit progress.
+/// Chunks from any transfer other than the active one are rejected.
+pub async fn assist_chunk(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), String> {
+    let dl = manager
+        .downloads
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or("download not found")?;
+    if dl.assist_transfer.lock().await.as_deref() != Some(transfer_id) {
+        return Err("stale transfer".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&dl.file_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|e| e.to_string())?;
+    file.write_all(data).await.map_err(|e| e.to_string())?;
+    let end = offset + data.len() as u64;
+    dl.external_bytes.fetch_max(end, Ordering::Relaxed);
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+    Ok(())
+}
+
+/// Finalize an assisted transfer.
+pub async fn assist_complete(app: &AppHandle, manager: &DownloadManager, id: &str) {
+    let Some(dl) = manager.downloads.lock().await.get(id).cloned() else {
+        return;
+    };
+    *dl.status.lock().await = DownloadStatus::Completed;
+    *dl.assist_transfer.lock().await = None;
+    release_path(&dl.reserved, &dl.file_path).await;
+    persist::delete_state(&state_path(manager, id)).await;
+    write_history(manager.hist.as_ref(), &dl).await;
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+}
+
+/// Mark an assisted transfer as failed. The download stays eligible so the
+/// user can retry.
+pub async fn assist_failed(app: &AppHandle, manager: &DownloadManager, id: &str, message: String) {
+    let Some(dl) = manager.downloads.lock().await.get(id).cloned() else {
+        return;
+    };
+    *dl.assist_transfer.lock().await = None;
+    *dl.last_error.lock().await = Some(message);
+    dl.assist_eligible.store(true, Ordering::Relaxed);
+    *dl.status.lock().await = DownloadStatus::Error;
+    write_history(manager.hist.as_ref(), &dl).await;
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
 }
 
 // Remove a download from the list entirely — whether it is currently active or
@@ -1358,6 +1462,9 @@ pub async fn list_downloads(
             reserved: manager.reserved_paths.clone(),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             // Re-claim the destination path so new downloads don't collide
@@ -1636,6 +1743,9 @@ mod tests {
             reserved: Arc::new(Mutex::new(HashSet::new())),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
         });
 
         let client = reqwest::Client::new();
@@ -1702,6 +1812,9 @@ mod tests {
             reserved: Arc::new(Mutex::new(HashSet::new())),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
         });
 
         let client = reqwest::Client::new();
@@ -1779,6 +1892,9 @@ mod tests {
             reserved: Arc::new(Mutex::new(HashSet::new())),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
         });
 
         let client = reqwest::Client::new();

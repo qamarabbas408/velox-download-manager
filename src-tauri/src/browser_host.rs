@@ -13,6 +13,7 @@
 //! - Pausing is distinct from cancelling: pause keeps the partial file and
 //!   resume state so the transfer can continue later.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -20,10 +21,14 @@ use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::download::{begin_download, cancel_active, probe_impl, DownloadManager, StartRequest};
+use crate::download::{
+    assist_begin, assist_chunk, assist_complete, assist_failed, begin_download, cancel_active,
+    probe_impl, DownloadManager, StartRequest,
+};
 use velox_protocol::{
-    kind, AssistRequestPayload, CancelDownloadPayload, DownloadRequestPayload, Envelope,
-    HelloPayload, PROTOCOL_VERSION,
+    kind, AssistCompletedPayload, AssistFailedPayload, AssistRequestPayload, AssistStartedPayload,
+    CancelDownloadPayload, ChunkPayload, DownloadRequestPayload, Envelope, HelloPayload,
+    PROTOCOL_VERSION,
 };
 
 /// Default number of segments for browser-submitted downloads.
@@ -248,7 +253,64 @@ async fn handle_message(
             });
         }
         kind::ASSIST_STARTED => {
-            eprintln!("velox browser host: assist started {}", env.payload);
+            if let Ok(p) = velox_protocol::decode::<AssistStartedPayload>(&env) {
+                let manager = app.state::<DownloadManager>();
+                let _ = assist_begin(app, manager.inner(), &p.download_id, &p.transfer_id).await;
+                eprintln!("velox browser host: assist started for {}", p.download_id);
+            }
+        }
+        kind::CHUNK => {
+            let payload: ChunkPayload = match velox_protocol::decode(&env) {
+                Ok(p) => p,
+                Err(_) => {
+                    let _ = reply_error(tx, &env.id, "INVALID_CHUNK", "Malformed chunk").await;
+                    return;
+                }
+            };
+            let bytes = match STANDARD.decode(payload.data.as_bytes()) {
+                Ok(b) => b,
+                Err(_) => {
+                    let _ = reply_error(tx, &env.id, "INVALID_CHUNK", "Chunk not valid base64").await;
+                    return;
+                }
+            };
+            let manager = app.state::<DownloadManager>();
+            let accepted = assist_chunk(
+                app,
+                manager.inner(),
+                &payload.download_id,
+                &payload.transfer_id,
+                payload.offset,
+                &bytes,
+            )
+            .await
+            .is_ok();
+            // A `cancelled: true` ack tells the extension to stop streaming
+            // (download removed, or a superseded transfer).
+            let _ = reply(
+                tx,
+                &new_id("ack"),
+                kind::CHUNK_ACK,
+                serde_json::json!({
+                    "downloadId": payload.download_id,
+                    "transferId": payload.transfer_id,
+                    "seq": payload.seq,
+                    "cancelled": !accepted,
+                }),
+            )
+            .await;
+        }
+        kind::ASSIST_COMPLETED => {
+            if let Ok(p) = velox_protocol::decode::<AssistCompletedPayload>(&env) {
+                let manager = app.state::<DownloadManager>();
+                assist_complete(app, manager.inner(), &p.download_id).await;
+            }
+        }
+        kind::ASSIST_FAILED => {
+            if let Ok(p) = velox_protocol::decode::<AssistFailedPayload>(&env) {
+                let manager = app.state::<DownloadManager>();
+                assist_failed(app, manager.inner(), &p.download_id, p.message).await;
+            }
         }
         _ => {
             let _ = reply_error(tx, &env.id, "UNSUPPORTED", "Unknown message type").await;

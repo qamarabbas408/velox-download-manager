@@ -1,6 +1,7 @@
 import { ErrorCode, MessageType, PROTOCOL_VERSION, VeloxError } from "./types";
 import type {
   AssistRequestPayload,
+  ChunkAckPayload,
   DownloadAcceptedPayload,
   DownloadRequestPayload,
   Envelope,
@@ -45,6 +46,9 @@ interface SendOptions {
 }
 
 const pending = new Map<string, Pending>();
+let assistBridge: ((req: AssistRequestPayload) => void) | null = null;
+let ackBridge: ((ack: ChunkAckPayload) => void) | null = null;
+let cancelBridge: ((downloadId: string) => void) | null = null;
 
 function newId(): string {
   idSeq += 1;
@@ -115,19 +119,22 @@ function ensurePort(): chrome.runtime.Port {
       return;
     }
     if (msg.type === MessageType.ASSIST_REQUEST) {
-      // M2 stub: acknowledge. Streaming arrives in M3.
-      try {
-        const req = (msg.payload ?? {}) as AssistRequestPayload;
-        next.postMessage(
-          envelope(msg.id, MessageType.ASSIST_STARTED, {
-            downloadId: req.downloadId,
-            transferId: `t-${msg.id}`,
-          })
-        );
-        chrome.storage.local.set({ lastAssist: Date.now() });
-      } catch {
-        // ignore
-      }
+      const req = (msg.payload ?? {}) as AssistRequestPayload;
+      // Prefer a page-context fetch (satisfies Cloudflare challenges); fall
+      // back to a service-worker fetch if no bridge is registered.
+      if (assistBridge) assistBridge(req);
+      else void streamAssist(next, req);
+      return;
+    }
+    if (msg.type === MessageType.CHUNK_ACK) {
+      const ack = (msg.payload ?? {}) as ChunkAckPayload;
+      if (ackBridge) ackBridge(ack);
+      else onChunkAck(ack);
+      return;
+    }
+    if (msg.type === MessageType.CANCEL_DOWNLOAD) {
+      const p = (msg.payload ?? {}) as { downloadId?: string };
+      if (cancelBridge && p.downloadId) cancelBridge(p.downloadId);
       return;
     }
     if (msg.type === MessageType.READY) {
@@ -231,6 +238,184 @@ export async function submit(
 
 export function status(): StatusResponse {
   return { connected, lastError, clientId: CLIENT_ID };
+}
+
+/** Post an arbitrary protocol message to the app over the native port. */
+export function postNative(type: string, payload: unknown): boolean {
+  if (!port) return false;
+  try {
+    port.postMessage(envelope(newId(), type, payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Register the handler invoked when the app requests browser assistance. */
+export function setAssistBridge(fn: (req: AssistRequestPayload) => void): void {
+  assistBridge = fn;
+}
+
+/** Register the handler invoked for chunk acknowledgements (page path). */
+export function setAckBridge(fn: (ack: ChunkAckPayload) => void): void {
+  ackBridge = fn;
+}
+
+/** Register the handler invoked when the app cancels a download. */
+export function setCancelBridge(fn: (downloadId: string) => void): void {
+  cancelBridge = fn;
+}
+
+// --- Browser-assisted streaming (M3) -----------------------------------------
+
+const MAX_UNACKED_BYTES = 4 * 1024 * 1024;
+const ASSIST_CHUNK_BYTES = 1024 * 1024;
+
+interface Transfer {
+  unacked: number;
+  sizes: Map<number, number>;
+  waiters: Array<() => void>;
+}
+
+const transfers = new Map<string, Transfer>();
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  if (a.length === 0) return b;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a);
+  out.set(b, a.length);
+  return out;
+}
+
+function waitForRoom(t: Transfer): Promise<void> {
+  if (t.unacked <= MAX_UNACKED_BYTES) return Promise.resolve();
+  return new Promise((resolve) => t.waiters.push(resolve));
+}
+
+function onChunkAck(ack: ChunkAckPayload): void {
+  const t = transfers.get(ack.transferId);
+  if (!t) return;
+  const len = t.sizes.get(ack.seq) ?? 0;
+  t.sizes.delete(ack.seq);
+  t.unacked = Math.max(0, t.unacked - len);
+  if (t.unacked <= MAX_UNACKED_BYTES / 2) {
+    t.waiters.splice(0).forEach((resolve) => resolve());
+  }
+}
+
+async function streamAssist(port: chrome.runtime.Port, req: AssistRequestPayload): Promise<void> {
+  const downloadId = req.downloadId;
+  const transferId = `t-${downloadId}-${Date.now().toString(36)}`;
+  const post = (type: string, payload: unknown) => {
+    try {
+      port.postMessage(envelope(newId(), type, payload));
+    } catch {
+      // port closed
+    }
+  };
+
+  post(MessageType.ASSIST_STARTED, { downloadId, transferId });
+
+  let res: Response;
+  try {
+    res = await fetch(req.url, { credentials: "include", redirect: "follow" });
+  } catch (e) {
+    post(MessageType.ASSIST_FAILED, {
+      downloadId,
+      transferId,
+      code: "ASSIST_FETCH_FAILED",
+      message: e instanceof Error ? e.message : String(e),
+    });
+    return;
+  }
+
+  console.log("[velox assist] fetch result", {
+    url: req.url,
+    status: res.status,
+    ok: res.ok,
+    contentType: res.headers.get("content-type"),
+    cfMitigated: res.headers.get("cf-mitigated"),
+  });
+
+  if (!res.ok || !res.body) {
+    post(MessageType.ASSIST_FAILED, {
+      downloadId,
+      transferId,
+      code: "ASSIST_FETCH_FAILED",
+      message: `HTTP ${res.status}`,
+    });
+    return;
+  }
+
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+  if (contentType.startsWith("text/html")) {
+    post(MessageType.ASSIST_FAILED, {
+      downloadId,
+      transferId,
+      code: "ASSIST_CHALLENGE",
+      message: "Server returned an HTML page (possible bot check).",
+    });
+    return;
+  }
+
+  const transfer: Transfer = { unacked: 0, sizes: new Map(), waiters: [] };
+  transfers.set(transferId, transfer);
+
+  const reader = res.body.getReader();
+  let seq = 0;
+  let offset = 0;
+  let buffer = new Uint8Array(0);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer = concatBytes(buffer, value);
+      while (buffer.length >= ASSIST_CHUNK_BYTES) {
+        const part = buffer.subarray(0, ASSIST_CHUNK_BYTES);
+        post(MessageType.CHUNK, {
+          downloadId,
+          transferId,
+          seq,
+          offset,
+          data: bytesToBase64(part),
+        });
+        transfer.sizes.set(seq, part.length);
+        transfer.unacked += part.length;
+        offset += part.length;
+        seq += 1;
+        buffer = buffer.subarray(ASSIST_CHUNK_BYTES);
+        await waitForRoom(transfer);
+      }
+    }
+    if (buffer.length > 0) {
+      post(MessageType.CHUNK, {
+        downloadId,
+        transferId,
+        seq,
+        offset,
+        data: bytesToBase64(buffer),
+      });
+    }
+    post(MessageType.ASSIST_COMPLETED, { downloadId, transferId });
+  } catch (e) {
+    post(MessageType.ASSIST_FAILED, {
+      downloadId,
+      transferId,
+      code: "ASSIST_STREAM_FAILED",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  } finally {
+    transfers.delete(transferId);
+  }
 }
 
 /** Reset module state. Test-only. */

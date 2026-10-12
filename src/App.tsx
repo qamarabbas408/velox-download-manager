@@ -260,6 +260,7 @@ export default function App() {
             downloadDir: p.downloadDir,
             errorMessage: p.error ?? null,
             assistEligible: p.assistEligible ?? false,
+            assisted: p.assisted ?? false,
           };
           return [item, ...prev];
         }
@@ -276,6 +277,7 @@ export default function App() {
                 etaSeconds: eta,
                 errorMessage: p.error ?? null,
                 assistEligible: p.assistEligible ?? d.assistEligible,
+                assisted: p.assisted ?? d.assisted,
                 segments,
               }
             : d

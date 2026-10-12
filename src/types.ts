@@ -36,6 +36,7 @@ export interface DownloadItem {
   errorMessage?: string | null;
   missing?: boolean;
   assistEligible?: boolean;
+  assisted?: boolean;
 }
 
 export interface SidebarSection {
