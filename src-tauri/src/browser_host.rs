@@ -303,13 +303,13 @@ async fn handle_message(
         kind::ASSIST_COMPLETED => {
             if let Ok(p) = velox_protocol::decode::<AssistCompletedPayload>(&env) {
                 let manager = app.state::<DownloadManager>();
-                assist_complete(app, manager.inner(), &p.download_id).await;
+                assist_complete(app, manager.inner(), &p.download_id, &p.transfer_id).await;
             }
         }
         kind::ASSIST_FAILED => {
             if let Ok(p) = velox_protocol::decode::<AssistFailedPayload>(&env) {
                 let manager = app.state::<DownloadManager>();
-                assist_failed(app, manager.inner(), &p.download_id, p.message).await;
+                assist_failed(app, manager.inner(), &p.download_id, &p.transfer_id, p.message).await;
             }
         }
         _ => {

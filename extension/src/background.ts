@@ -216,7 +216,10 @@ setAckBridge((ack) => {
     state.acks.delete(ack.seq);
     resolve(Boolean(ack.cancelled));
   }
-  if (ack.cancelled) state.cancelled = true;
+  if (ack.cancelled) {
+    state.cancelled = true;
+    cleanupAssist(ack.transferId);
+  }
 });
 
 setCancelBridge((downloadId) => {
@@ -268,6 +271,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const timer = setTimeout(() => {
         state.acks.delete(msg.seq);
         sendResponse({ cancelled: true });
+        cleanupAssist(msg.transferId);
       }, 60000);
       state.acks.set(msg.seq, (cancelled) => {
         clearTimeout(timer);

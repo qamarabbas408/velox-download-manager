@@ -24,6 +24,9 @@ const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Maximum time to wait for a chunk before considering the connection stalled.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time an assisted transfer may go without a chunk before it is
+/// marked failed (covers SW sleep, dropped port, or a closed page).
+const ASSIST_STALL_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_MAX_CONN: usize = 32;
 
 #[derive(Debug)]
@@ -159,6 +162,10 @@ pub struct ActiveDownload {
     pub assisted: AtomicBool,
     /// The active assisted-transfer id (guards against stale/duplicate chunks).
     pub assist_transfer: Mutex<Option<String>>,
+    /// Last time an assisted chunk was received (watchdog).
+    pub last_assist_activity: Mutex<Instant>,
+    /// Last time an assisted chunk was fully written (watchdog).
+    pub assist_last_written: Mutex<Instant>,
 }
 
 pub struct DownloadManager {
@@ -1178,6 +1185,8 @@ pub async fn begin_download(
         external_bytes: AtomicU64::new(0),
         assisted: AtomicBool::new(false),
         assist_transfer: Mutex::new(None),
+        last_assist_activity: Mutex::new(Instant::now()),
+        assist_last_written: Mutex::new(Instant::now()),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -1251,6 +1260,7 @@ pub async fn cancel_download(
 pub async fn cancel_active(manager: &DownloadManager, id: &str) {
     if let Some(dl) = manager.downloads.lock().await.remove(id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
+        *dl.assist_transfer.lock().await = None;
         let _ = tokio::fs::remove_file(&dl.file_path).await;
         release_path(&manager.reserved_paths, &dl.file_path).await;
     }
@@ -1283,11 +1293,20 @@ pub async fn assist_begin(
     dl.assist_eligible.store(false, Ordering::Relaxed);
     dl.pause_flag.store(false, Ordering::Relaxed);
     dl.cancel_flag.store(false, Ordering::Relaxed);
+    let now = Instant::now();
     *dl.assist_transfer.lock().await = Some(transfer_id.to_string());
+    *dl.last_assist_activity.lock().await = now;
+    *dl.assist_last_written.lock().await = now;
     *dl.last_error.lock().await = None;
     *dl.status.lock().await = DownloadStatus::Downloading;
     write_history(manager.hist.as_ref(), &dl).await;
     emit_progress(app, &dl, 0).await;
+    tauri::async_runtime::spawn(supervise_assist(
+        app.clone(),
+        dl.clone(),
+        manager.hist.clone(),
+        transfer_id.to_string(),
+    ));
     Ok(())
 }
 
@@ -1311,6 +1330,7 @@ pub async fn assist_chunk(
     if dl.assist_transfer.lock().await.as_deref() != Some(transfer_id) {
         return Err("stale transfer".to_string());
     }
+    *dl.last_assist_activity.lock().await = Instant::now();
     let mut file = OpenOptions::new()
         .write(true)
         .open(&dl.file_path)
@@ -1322,35 +1342,105 @@ pub async fn assist_chunk(
     file.write_all(data).await.map_err(|e| e.to_string())?;
     let end = offset + data.len() as u64;
     dl.external_bytes.fetch_max(end, Ordering::Relaxed);
+    *dl.assist_last_written.lock().await = Instant::now();
     emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
     Ok(())
 }
 
-/// Finalize an assisted transfer.
-pub async fn assist_complete(app: &AppHandle, manager: &DownloadManager, id: &str) {
+/// Finalize an assisted transfer. Ignored if the active transfer has already
+/// been superseded (retry), failed, or cleared by the watchdog.
+pub async fn assist_complete(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+) {
     let Some(dl) = manager.downloads.lock().await.get(id).cloned() else {
         return;
     };
+    let mut t = dl.assist_transfer.lock().await;
+    if t.as_deref() != Some(transfer_id) {
+        return;
+    }
+    *t = None;
     *dl.status.lock().await = DownloadStatus::Completed;
-    *dl.assist_transfer.lock().await = None;
+    drop(t);
     release_path(&dl.reserved, &dl.file_path).await;
     persist::delete_state(&state_path(manager, id)).await;
     write_history(manager.hist.as_ref(), &dl).await;
     emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
 }
 
-/// Mark an assisted transfer as failed. The download stays eligible so the
-/// user can retry.
-pub async fn assist_failed(app: &AppHandle, manager: &DownloadManager, id: &str, message: String) {
+/// Mark an assisted transfer as failed. Ignored if superseded. The download
+/// stays eligible so the user can retry.
+pub async fn assist_failed(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+    message: String,
+) {
     let Some(dl) = manager.downloads.lock().await.get(id).cloned() else {
         return;
     };
-    *dl.assist_transfer.lock().await = None;
+    let mut t = dl.assist_transfer.lock().await;
+    if t.as_deref() != Some(transfer_id) {
+        return;
+    }
+    *t = None;
     *dl.last_error.lock().await = Some(message);
     dl.assist_eligible.store(true, Ordering::Relaxed);
     *dl.status.lock().await = DownloadStatus::Error;
+    drop(t);
     write_history(manager.hist.as_ref(), &dl).await;
     emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+}
+
+/// Watchdog for assisted transfers. If no chunk arrives within the stall
+/// window (service worker slept, port dropped, or the page was closed), the
+/// download is marked failed and becomes eligible for another retry instead of
+/// sitting on "Downloading" forever.
+async fn supervise_assist(
+    app: AppHandle,
+    dl: Arc<ActiveDownload>,
+    hist: Option<history::HistoryPool>,
+    transfer_id: String,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Activity = the most recent of "chunk received" and "chunk written",
+        // so a slow producer or a slow writer are both distinguished from a
+        // genuinely idle transfer.
+        let received = dl.last_assist_activity.lock().await.elapsed();
+        let written = dl.assist_last_written.lock().await.elapsed();
+        if received.min(written) < ASSIST_STALL_TIMEOUT {
+            continue;
+        }
+
+        // Serialize with completion/failure/retry: verify the transfer is
+        // still the active one and still downloading before committing.
+        let mut t = dl.assist_transfer.lock().await;
+        if t.as_deref() != Some(transfer_id.as_str()) {
+            return;
+        }
+        if *dl.status.lock().await != DownloadStatus::Downloading {
+            return;
+        }
+        *t = None;
+        *dl.status.lock().await = DownloadStatus::Error;
+        drop(t);
+
+        dl.assist_eligible.store(true, Ordering::Relaxed);
+        *dl.last_error.lock().await = Some(format!(
+            "Browser assistance stalled (no data for {}s). Open the site and retry.",
+            ASSIST_STALL_TIMEOUT.as_secs()
+        ));
+        release_path(&dl.reserved, &dl.file_path).await;
+        write_history(hist.as_ref(), &dl).await;
+        emit_progress(&app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+        return;
+    }
 }
 
 // Remove a download from the list entirely — whether it is currently active or
@@ -1365,6 +1455,7 @@ pub async fn remove_download(
 ) -> Result<(), String> {
     if let Some(dl) = manager.downloads.lock().await.remove(&id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
+        *dl.assist_transfer.lock().await = None;
         let _ = tokio::fs::remove_file(&dl.file_path).await;
         release_path(&manager.reserved_paths, &dl.file_path).await;
         persist::delete_state(&state_path(&manager, &id)).await;
@@ -1465,6 +1556,8 @@ pub async fn list_downloads(
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             // Re-claim the destination path so new downloads don't collide
@@ -1746,6 +1839,8 @@ mod tests {
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -1815,6 +1910,8 @@ mod tests {
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -1895,6 +1992,8 @@ mod tests {
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
