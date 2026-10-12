@@ -37,6 +37,7 @@ export interface EngineProgress {
   totalBytes: number;
   speedBytesPerSec: number;
   error?: string | null;
+  assistEligible?: boolean;
   segments: EngineSegment[];
 }
 
@@ -103,6 +104,11 @@ export function cancelDownload(id: string): Promise<void> {
 
 export function removeDownload(id: string, deleteFile = false): Promise<void> {
   return invoke("remove_download", { id, deleteFile });
+}
+
+/// Ask the browser (via the extension) to assist an eligible failed download.
+export function assistDownload(id: string): Promise<void> {
+  return invoke("assist_download", { id });
 }
 
 export function listDownloads(): Promise<ResumeSummary[]> {

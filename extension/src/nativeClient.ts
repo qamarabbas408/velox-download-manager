@@ -1,5 +1,6 @@
 import { ErrorCode, MessageType, PROTOCOL_VERSION, VeloxError } from "./types";
 import type {
+  AssistRequestPayload,
   DownloadAcceptedPayload,
   DownloadRequestPayload,
   Envelope,
@@ -108,6 +109,22 @@ function ensurePort(): chrome.runtime.Port {
       try {
         next.postMessage(envelope(msg.id, MessageType.PONG, { clientId: CLIENT_ID }));
         chrome.storage.local.set({ lastPing: Date.now() });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (msg.type === MessageType.ASSIST_REQUEST) {
+      // M2 stub: acknowledge. Streaming arrives in M3.
+      try {
+        const req = (msg.payload ?? {}) as AssistRequestPayload;
+        next.postMessage(
+          envelope(msg.id, MessageType.ASSIST_STARTED, {
+            downloadId: req.downloadId,
+            transferId: `t-${msg.id}`,
+          })
+        );
+        chrome.storage.local.set({ lastAssist: Date.now() });
       } catch {
         // ignore
       }

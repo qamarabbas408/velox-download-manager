@@ -169,11 +169,15 @@ export function DownloadDetailDrawer({
   history,
   modalOpen,
   onClose,
+  onAssist,
+  onDismissAssist,
 }: {
   item: DownloadItem | null;
   history: DownloadSpeedSample[];
   modalOpen: boolean;
   onClose: () => void;
+  onAssist: (item: DownloadItem) => void;
+  onDismissAssist: (id: string) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -335,6 +339,29 @@ export function DownloadDetailDrawer({
                 <p className="text-[11px] text-paused/90">
                   This file was moved or deleted from disk. Use Remove to clear this entry.
                 </p>
+              </div>
+            )}
+            {item.status === "error" && item.assistEligible && (
+              <div className="rounded-lg bg-signal/10 border border-signal/25 px-3 py-3 space-y-2">
+                <p className="text-xs text-signal font-medium">Browser assistance may help</p>
+                <p className="text-[11px] text-muted leading-relaxed">
+                  Velox couldn't download this file directly. You can retry using your browser's
+                  session.
+                </p>
+                <div className="flex items-center gap-2 pt-0.5">
+                  <button
+                    onClick={() => onAssist(item)}
+                    className="btn-primary text-xs font-medium px-3 py-1.5 rounded-md transition-all"
+                  >
+                    Retry with Browser
+                  </button>
+                  <button
+                    onClick={() => onDismissAssist(item.id)}
+                    className="text-xs px-2 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
             {item.status === "error" && item.errorMessage && (

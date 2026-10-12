@@ -90,6 +90,16 @@ pub struct CancelDownloadPayload {
     pub download_id: String,
 }
 
+/// App -> extension request to fetch a download using the browser session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistRequestPayload {
+    pub download_id: String,
+    pub url: String,
+    pub method: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub code: String,

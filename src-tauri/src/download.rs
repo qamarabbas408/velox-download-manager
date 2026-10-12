@@ -30,14 +30,17 @@ const DEFAULT_MAX_CONN: usize = 32;
 struct SegmentError {
     message: String,
     retriable: bool,
+    /// True when the failure looks like one browser assistance could solve
+    /// (auth/forbidden/rate-limit responses).
+    assist: bool,
 }
 
 impl SegmentError {
     fn permanent(msg: String) -> Self {
-        Self { message: msg, retriable: false }
+        Self { message: msg, retriable: false, assist: false }
     }
     fn transient(msg: String) -> Self {
-        Self { message: msg, retriable: true }
+        Self { message: msg, retriable: true, assist: false }
     }
 }
 
@@ -99,6 +102,7 @@ pub struct DownloadProgress {
     pub total_bytes: u64,
     pub speed_bytes_per_sec: u64,
     pub error: Option<String>,
+    pub assist_eligible: bool,
     pub segments: Vec<SegmentState>,
 }
 
@@ -144,6 +148,10 @@ pub struct ActiveDownload {
     pub generation: AtomicU64,
     /// Shared destination-path registry this download participates in.
     pub reserved: ReservedPaths,
+    /// Set when the failure is one browser assistance could plausibly solve.
+    pub assist_eligible: AtomicBool,
+    /// The browser client that submitted this download (extension path only).
+    pub origin_client: Mutex<Option<String>>,
 }
 
 pub struct DownloadManager {
@@ -167,6 +175,24 @@ impl DownloadManager {
             downloads: Mutex::new(HashMap::new()),
             reserved_paths: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Associate an active download with the browser client that submitted it.
+    pub async fn set_origin_client(&self, id: &str, client_id: Option<String>) {
+        if let Some(dl) = self.downloads.lock().await.get(id).cloned() {
+            *dl.origin_client.lock().await = client_id;
+        }
+    }
+
+    /// Returns (url, origin_client, assist_eligible) for a download.
+    pub async fn assist_info(&self, id: &str) -> Option<(String, Option<String>, bool)> {
+        let dl = self.downloads.lock().await.get(id).cloned()?;
+        let origin = dl.origin_client.lock().await.clone();
+        Some((
+            dl.url.clone(),
+            origin,
+            dl.assist_eligible.load(Ordering::Relaxed),
+        ))
     }
 }
 
@@ -474,6 +500,7 @@ async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
             total_bytes: dl.total_size,
             speed_bytes_per_sec: dl.speed.load(Ordering::Relaxed),
             error,
+            assist_eligible: dl.assist_eligible.load(Ordering::Relaxed),
             segments,
         },
     );
@@ -660,11 +687,46 @@ async fn run_segment_inner(
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
             || status == StatusCode::SERVICE_UNAVAILABLE;
+        // Auth/forbidden/rate-limit responses are candidates for browser
+        // assistance (the browser session may satisfy them).
+        let assist = status == StatusCode::UNAUTHORIZED
+            || status == StatusCode::FORBIDDEN
+            || status == StatusCode::TOO_MANY_REQUESTS;
         let detail = describe_http_status(resp).await;
         return Err(SegmentError {
             message: format!("download rejected by server{detail}"),
             retriable,
+            assist,
         });
+    }
+
+    // A 200 that is actually an HTML interstitial (bot/anti-bot challenge) is
+    // a prime candidate for browser assistance.
+    let target_is_html = dl
+        .file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            e == "html" || e == "htm"
+        })
+        .unwrap_or(false);
+    if !target_is_html {
+        if let Some(ct) = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase())
+        {
+            if ct.starts_with("text/html") {
+                return Err(SegmentError {
+                    message: "server returned an HTML page instead of the file (possible bot check)"
+                        .to_string(),
+                    retriable: false,
+                    assist: true,
+                });
+            }
+        }
     }
 
     let mut stream = resp.bytes_stream();
@@ -892,6 +954,9 @@ async fn run_download_inner(
                     };
                     let give_up = attempts >= MAX_SEGMENT_RETRIES || !err.retriable;
                     if give_up {
+                        if err.assist {
+                            dl.assist_eligible.store(true, Ordering::Relaxed);
+                        }
                         *dl.last_error.lock().await = Some(err.message);
                         *dl.status.lock().await = DownloadStatus::Error;
                         write_history(hist, &dl).await;
@@ -1100,6 +1165,8 @@ pub async fn begin_download(
         run_lock: Mutex::new(()),
         generation: AtomicU64::new(0),
         reserved: manager.reserved_paths.clone(),
+        assist_eligible: AtomicBool::new(false),
+        origin_client: Mutex::new(None),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -1289,6 +1356,8 @@ pub async fn list_downloads(
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             reserved: manager.reserved_paths.clone(),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             // Re-claim the destination path so new downloads don't collide
@@ -1565,6 +1634,8 @@ mod tests {
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
         });
 
         let client = reqwest::Client::new();
@@ -1629,6 +1700,8 @@ mod tests {
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
         });
 
         let client = reqwest::Client::new();
@@ -1704,6 +1777,8 @@ mod tests {
             run_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
         });
 
         let client = reqwest::Client::new();

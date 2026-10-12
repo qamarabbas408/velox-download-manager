@@ -22,7 +22,8 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::download::{begin_download, cancel_active, probe_impl, DownloadManager, StartRequest};
 use velox_protocol::{
-    kind, CancelDownloadPayload, DownloadRequestPayload, Envelope, HelloPayload, PROTOCOL_VERSION,
+    kind, AssistRequestPayload, CancelDownloadPayload, DownloadRequestPayload, Envelope,
+    HelloPayload, PROTOCOL_VERSION,
 };
 
 /// Default number of segments for browser-submitted downloads.
@@ -241,9 +242,13 @@ async fn handle_message(
             // connection stays responsive (needed for streaming later).
             let app = app.clone();
             let tx = tx.clone();
+            let origin = client_id.clone();
             tauri::async_runtime::spawn(async move {
-                handle_download_request(app, tx, env).await;
+                handle_download_request(app, tx, env, origin).await;
             });
+        }
+        kind::ASSIST_STARTED => {
+            eprintln!("velox browser host: assist started {}", env.payload);
         }
         _ => {
             let _ = reply_error(tx, &env.id, "UNSUPPORTED", "Unknown message type").await;
@@ -251,7 +256,7 @@ async fn handle_message(
     }
 }
 
-async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope) {
+async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope, origin: Option<String>) {
     let payload: DownloadRequestPayload = match velox_protocol::decode(&env) {
         Ok(p) => p,
         Err(_) => {
@@ -276,6 +281,7 @@ async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope) {
             };
             match begin_download(&app, manager.inner(), request, false).await {
                 Ok(()) => {
+                    manager.set_origin_client(&id, origin).await;
                     let _ = reply(
                         &tx,
                         &env.id,
@@ -293,6 +299,42 @@ async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope) {
             let _ = reply_error(&tx, &env.id, "PROBE_FAILED", &e).await;
         }
     }
+}
+
+/// Request browser assistance for an eligible failed download. Routes to the
+/// browser client that originally submitted it.
+#[tauri::command]
+pub async fn assist_download(
+    clients: tauri::State<'_, Arc<BrowserClients>>,
+    manager: tauri::State<'_, DownloadManager>,
+    id: String,
+) -> Result<(), String> {
+    let (url, origin, eligible) = manager
+        .assist_info(&id)
+        .await
+        .ok_or_else(|| "Download not found".to_string())?;
+
+    if !eligible {
+        return Err("This download isn't eligible for browser assistance.".to_string());
+    }
+
+    let client_id = origin.ok_or_else(|| {
+        "This download wasn't started from the browser. Open your browser with the Velox extension connected, then retry.".to_string()
+    })?;
+
+    let clients = clients.inner().clone();
+    let payload = AssistRequestPayload {
+        download_id: id,
+        url,
+        method: "GET".to_string(),
+        reason: "native_failed".to_string(),
+    };
+    let env = Envelope::new(
+        new_id("assist"),
+        kind::ASSIST_REQUEST,
+        serde_json::to_value(payload).map_err(|e| e.to_string())?,
+    );
+    clients.send_to(&client_id, env).await
 }
 
 /// Push a ping to one or all connected extension clients (M1 test helper).

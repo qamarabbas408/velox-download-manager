@@ -20,6 +20,7 @@ import {
   getMissingFiles,
   getStorageStats,
   getDefaultDownloadDir,
+  assistDownload,
   isTauri,
   listDownloads,
   onDownloadProgress,
@@ -57,7 +58,7 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; names: string[] } | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ id: string; label: string } | null>(null);
+  const [toast, setToast] = useState<{ id: string; label: string; title?: string; action?: "view" } | null>(null);
   const [inProgressUnseen, setInProgressUnseen] = useState(false);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
@@ -220,7 +221,7 @@ export default function App() {
       // A download started outside the UI (e.g. the browser extension).
       const isNewExternal = !downloadsRef.current.some((d) => d.id === p.id);
       if (isNewExternal && initialLoadDoneRef.current) {
-        setToast({ id: p.id, label: `${p.name}.${p.extension}` });
+        setToast({ id: p.id, label: `${p.name}.${p.extension}`, title: "New download started", action: "view" });
         if (activeIdRef.current !== "in-progress") setInProgressUnseen(true);
       }
       setDownloads((prev) => {
@@ -258,6 +259,7 @@ export default function App() {
             source: p.source,
             downloadDir: p.downloadDir,
             errorMessage: p.error ?? null,
+            assistEligible: p.assistEligible ?? false,
           };
           return [item, ...prev];
         }
@@ -273,6 +275,7 @@ export default function App() {
                 speedBytesPerSec: p.speedBytesPerSec,
                 etaSeconds: eta,
                 errorMessage: p.error ?? null,
+                assistEligible: p.assistEligible ?? d.assistEligible,
                 segments,
               }
             : d
@@ -414,6 +417,31 @@ export default function App() {
 
   const handleReveal = (item: DownloadItem) => {
     if (isTauri) revealDownload(item.downloadDir, item.name, item.extension).catch(() => {});
+  };
+
+  const handleAssist = (item: DownloadItem) => {
+    if (!isTauri) return;
+    assistDownload(item.id)
+      .then(() =>
+        setToast({
+          id: item.id,
+          label: `${item.name}.${item.extension}`,
+          title: "Browser assistance requested",
+        })
+      )
+      .catch((e) =>
+        setToast({
+          id: item.id,
+          label: String(e),
+          title: "Browser assistance unavailable",
+        })
+      );
+  };
+
+  const dismissAssist = (id: string) => {
+    setDownloads((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, assistEligible: false } : d))
+    );
   };
 
   const toggleSelect = (id: string) => {
@@ -581,6 +609,8 @@ export default function App() {
         history={detailId ? downloadHistoryRef.current.get(detailId) ?? [] : []}
         modalOpen={isAddOpen || isSettingsOpen}
         onClose={closeDetailDrawer}
+        onAssist={handleAssist}
+        onDismissAssist={dismissAssist}
       />
 
       {toast && (
@@ -588,16 +618,18 @@ export default function App() {
           <div className="flex items-center gap-3 bg-raised border border-line rounded-xl px-4 py-3 shadow-2xl">
             <span className="w-2 h-2 rounded-full bg-signal shrink-0" />
             <div className="min-w-0">
-              <p className="text-sm text-ink font-medium">New download started</p>
+              <p className="text-sm text-ink font-medium">{toast.title ?? "New download started"}</p>
               <p className="text-xs text-dim truncate max-w-[240px]">{toast.label}</p>
             </div>
-            <button
-              onClick={showInProgress}
-              className="flex items-center gap-1 text-signal text-sm font-medium hover:underline shrink-0"
-            >
-              View
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+            {toast.action === "view" && (
+              <button
+                onClick={showInProgress}
+                className="flex items-center gap-1 text-signal text-sm font-medium hover:underline shrink-0"
+              >
+                View
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
             <button
               onClick={() => setToast(null)}
               aria-label="Dismiss"
