@@ -197,6 +197,12 @@ async function assistViaPage(req: AssistRequestPayload): Promise<void> {
     cancelled: false,
     acks: new Map(),
   });
+  // Tell the app we're waiting on the browser (challenge/load), so it can show
+  // a waiting state instead of a failure.
+  postNative(MessageType.ASSIST_PENDING, {
+    downloadId: req.downloadId,
+    transferId,
+  });
   await waitForComplete(found.tabId);
 
   chrome.scripting
@@ -274,13 +280,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ cancelled: true });
         break;
       }
-      postNative(MessageType.CHUNK, {
+      const posted = postNative(MessageType.CHUNK, {
         downloadId: msg.downloadId,
         transferId: msg.transferId,
         seq: msg.seq,
         offset: msg.offset,
         data: msg.data,
       });
+      if (!posted) {
+        sendResponse({ cancelled: true });
+        cleanupAssist(msg.transferId);
+        break;
+      }
       // Hold the response until the app acknowledges this chunk so the page
       // can't outrun Velox's writes (end-to-end backpressure).
       const timer = setTimeout(() => {

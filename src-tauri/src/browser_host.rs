@@ -22,8 +22,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::download::{
-    assist_begin, assist_chunk, assist_complete, assist_failed, begin_download, cancel_active,
-    probe_impl, DownloadManager, StartRequest,
+    assist_begin, assist_chunk, assist_complete, assist_failed, assist_pending_begin, begin_download,
+    cancel_active, probe_impl, DownloadManager, StartRequest,
 };
 use velox_protocol::{
     kind, AssistCompletedPayload, AssistFailedPayload, AssistRequestPayload, AssistStartedPayload,
@@ -38,11 +38,17 @@ const OUTBOUND_QUEUE: usize = 64;
 
 type Tx = mpsc::Sender<Envelope>;
 
+/// A registered extension client.
+pub struct ClientEntry {
+    pub tx: Tx,
+    pub browser: String,
+}
+
 /// Registry of connected extension clients, keyed by the client id the
 /// extension reports in its `hello`. Used to push messages (e.g. assist
 /// requests) to the correct browser profile.
 #[derive(Default)]
-pub struct BrowserClients(pub Mutex<HashMap<String, Tx>>);
+pub struct BrowserClients(pub Mutex<HashMap<String, ClientEntry>>);
 
 impl BrowserClients {
     pub fn new() -> Self {
@@ -51,8 +57,11 @@ impl BrowserClients {
 
     /// Register a client connection. A newer connection with the same id
     /// replaces the previous registration.
-    pub async fn register(&self, client_id: String, tx: Tx) {
-        self.0.lock().await.insert(client_id, tx);
+    pub async fn register(&self, client_id: String, tx: Tx, browser: String) {
+        self.0
+            .lock()
+            .await
+            .insert(client_id, ClientEntry { tx, browser });
     }
 
     /// Remove a client registration, but only if it still belongs to this
@@ -61,7 +70,7 @@ impl BrowserClients {
     pub async fn unregister(&self, client_id: &str, tx: &Tx) {
         let mut reg = self.0.lock().await;
         if let Some(existing) = reg.get(client_id) {
-            if existing.same_channel(tx) {
+            if existing.tx.same_channel(tx) {
                 reg.remove(client_id);
             }
         }
@@ -70,7 +79,7 @@ impl BrowserClients {
     /// Send a message to a specific connected client. Returns a clear error if
     /// the client is unknown or its connection has closed.
     pub async fn send_to(&self, client_id: &str, env: Envelope) -> Result<(), String> {
-        let tx = self.0.lock().await.get(client_id).cloned();
+        let tx = self.0.lock().await.get(client_id).map(|e| e.tx.clone());
         match tx {
             Some(tx) => tx
                 .send(env)
@@ -78,6 +87,11 @@ impl BrowserClients {
                 .map_err(|_| format!("client {client_id} disconnected")),
             None => Err(format!("client {client_id} is not connected")),
         }
+    }
+
+    /// The browser label reported by a client (if connected).
+    pub async fn browser_of(&self, client_id: &str) -> Option<String> {
+        self.0.lock().await.get(client_id).map(|e| e.browser.clone())
     }
 }
 
@@ -201,7 +215,9 @@ async fn handle_message(
                 }
             };
             *client_id = Some(hello.client_id.clone());
-            clients.register(hello.client_id.clone(), tx.clone()).await;
+            clients
+                .register(hello.client_id.clone(), tx.clone(), hello.browser.clone())
+                .await;
 
             let _ = reply(
                 tx,
@@ -248,9 +264,20 @@ async fn handle_message(
             let app = app.clone();
             let tx = tx.clone();
             let origin = client_id.clone();
+            let browser = match &origin {
+                Some(id) => clients.browser_of(id).await,
+                None => None,
+            };
             tauri::async_runtime::spawn(async move {
-                handle_download_request(app, tx, env, origin).await;
+                handle_download_request(app, tx, env, origin, browser).await;
             });
+        }
+        kind::ASSIST_PENDING => {
+            if let Ok(p) = velox_protocol::decode::<AssistStartedPayload>(&env) {
+                let manager = app.state::<DownloadManager>();
+                let _ =
+                    assist_pending_begin(app, manager.inner(), &p.download_id, &p.transfer_id).await;
+            }
         }
         kind::ASSIST_STARTED => {
             if let Ok(p) = velox_protocol::decode::<AssistStartedPayload>(&env) {
@@ -325,7 +352,13 @@ async fn handle_message(
     }
 }
 
-async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope, origin: Option<String>) {
+async fn handle_download_request(
+    app: AppHandle,
+    tx: Tx,
+    env: Envelope,
+    origin: Option<String>,
+    browser: Option<String>,
+) {
     let payload: DownloadRequestPayload = match velox_protocol::decode(&env) {
         Ok(p) => p,
         Err(_) => {
@@ -351,6 +384,7 @@ async fn handle_download_request(app: AppHandle, tx: Tx, env: Envelope, origin: 
             match begin_download(&app, manager.inner(), request, false).await {
                 Ok(()) => {
                     manager.set_origin_client(&id, origin).await;
+                    manager.set_origin_browser(&id, browser).await;
                     let _ = reply(
                         &tx,
                         &env.id,
@@ -423,7 +457,7 @@ pub async fn ping_browser(
     // Snapshot senders so we don't hold the registry lock across awaits.
     let targets: Vec<(String, Tx)> = {
         let reg = clients.0.lock().await;
-        reg.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        reg.iter().map(|(k, v)| (k.clone(), v.tx.clone())).collect()
     };
     let mut sent = 0u32;
     for (id, tx) in targets {

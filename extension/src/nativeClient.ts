@@ -22,6 +22,22 @@ const CLIENT_ID = (() => {
   }
 })();
 
+/** Best-effort browser family label for the UI. */
+function detectBrowser(): string {
+  try {
+    const nav = navigator as Navigator & { brave?: unknown };
+    const ua = navigator.userAgent;
+    if (nav.brave) return "Brave";
+    if (/Edg\//.test(ua)) return "Edge";
+    if (/OPR\//.test(ua)) return "Opera";
+    return "Chrome";
+  } catch {
+    return "Browser";
+  }
+}
+
+const BROWSER = detectBrowser();
+
 export const REQUEST_TIMEOUT_MS = 8000;
 export const HANDSHAKE_TIMEOUT_MS = 4000;
 /** After a disconnect, fail fast for a short window instead of reconnecting. */
@@ -128,8 +144,9 @@ function ensurePort(): chrome.runtime.Port {
     }
     if (msg.type === MessageType.CHUNK_ACK) {
       const ack = (msg.payload ?? {}) as ChunkAckPayload;
+      // Release the SW-fetch window AND resolve a page-path chunk waiter.
+      onChunkAck(ack);
       if (ackBridge) ackBridge(ack);
-      else onChunkAck(ack);
       return;
     }
     if (msg.type === MessageType.CANCEL_DOWNLOAD) {
@@ -195,6 +212,7 @@ export function handshake(): void {
   const hello: HelloPayload = {
     extVersion: chrome.runtime.getManifest().version,
     clientId: CLIENT_ID,
+    browser: BROWSER,
   };
   sendRequest(MessageType.HELLO, hello, {
     timeoutMs: HANDSHAKE_TIMEOUT_MS,

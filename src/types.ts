@@ -37,6 +37,8 @@ export interface DownloadItem {
   missing?: boolean;
   assistEligible?: boolean;
   assisted?: boolean;
+  assistPending?: boolean;
+  assistBrowser?: string | null;
 }
 
 export interface SidebarSection {

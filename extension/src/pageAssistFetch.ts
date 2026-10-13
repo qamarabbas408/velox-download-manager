@@ -89,7 +89,7 @@ export async function pageAssistFetch(
   if (started.cancelled) return;
 
   const reader = res.body.getReader();
-  const CHUNK = 1024 * 1024;
+  const CHUNK = 512 * 1024;
   let seq = 0;
   let offset = 0;
   let buf = new Uint8Array(0);

@@ -16,6 +16,7 @@ export const MessageType = {
   DOWNLOAD_ACCEPTED: "download_accepted",
   DOWNLOAD_REJECTED: "download_rejected",
   ASSIST_REQUEST: "assist_request",
+  ASSIST_PENDING: "assist_pending",
   ASSIST_STARTED: "assist_started",
   ASSIST_FAILED: "assist_failed",
   CHUNK: "chunk",
@@ -46,6 +47,7 @@ export const MAX_UNACKED_BYTES = 4 * 1024 * 1024;
 export interface HelloPayload {
   extVersion: string;
   clientId: string;
+  browser: string;
 }
 
 export interface ReadyPayload {

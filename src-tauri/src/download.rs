@@ -26,7 +26,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time an assisted transfer may go without a chunk before it is
 /// marked failed (covers SW sleep, dropped port, or a closed page).
-const ASSIST_STALL_TIMEOUT: Duration = Duration::from_secs(20);
+const ASSIST_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_CONN: usize = 32;
 
 #[derive(Debug)]
@@ -107,6 +107,10 @@ pub struct DownloadProgress {
     pub error: Option<String>,
     pub assist_eligible: bool,
     pub assisted: bool,
+    /// True while waiting for the browser to become ready (polling).
+    pub assist_pending: bool,
+    /// Browser label supplying the assisted transfer (e.g. "Chrome").
+    pub assist_browser: Option<String>,
     pub segments: Vec<SegmentState>,
 }
 
@@ -156,12 +160,19 @@ pub struct ActiveDownload {
     pub assist_eligible: AtomicBool,
     /// The browser client that submitted this download (extension path only).
     pub origin_client: Mutex<Option<String>>,
+    /// Browser label of the originating client (e.g. "Chrome").
+    pub origin_browser: Mutex<Option<String>>,
     /// Bytes received via browser assistance (not from the native engine).
     pub external_bytes: AtomicU64,
     /// True once a download is being fulfilled via browser assistance.
     pub assisted: AtomicBool,
+    /// True while waiting for the browser to become ready (polling) — the
+    /// watchdog is suspended in this phase.
+    pub assist_pending: AtomicBool,
     /// The active assisted-transfer id (guards against stale/duplicate chunks).
     pub assist_transfer: Mutex<Option<String>>,
+    /// Transfer id of a pending (not yet streaming) assist request.
+    pub assist_pending_transfer: Mutex<Option<String>>,
     /// Last time an assisted chunk was received (watchdog).
     pub last_assist_activity: Mutex<Instant>,
     /// Last time an assisted chunk was fully written (watchdog).
@@ -169,6 +180,10 @@ pub struct ActiveDownload {
     /// Total size reported by the browser for the active assisted transfer
     /// (0 = unknown).
     pub assist_total: AtomicU64,
+    /// Bytes total at the last assisted speed sample.
+    pub assist_last_bytes: AtomicU64,
+    /// Time of the last assisted speed sample.
+    pub assist_speed_time: Mutex<Instant>,
 }
 
 pub struct DownloadManager {
@@ -198,6 +213,13 @@ impl DownloadManager {
     pub async fn set_origin_client(&self, id: &str, client_id: Option<String>) {
         if let Some(dl) = self.downloads.lock().await.get(id).cloned() {
             *dl.origin_client.lock().await = client_id;
+        }
+    }
+
+    /// Record the browser label of the originating client.
+    pub async fn set_origin_browser(&self, id: &str, browser: Option<String>) {
+        if let Some(dl) = self.downloads.lock().await.get(id).cloned() {
+            *dl.origin_browser.lock().await = browser;
         }
     }
 
@@ -523,6 +545,8 @@ pub(crate) async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, download
             error,
             assist_eligible: dl.assist_eligible.load(Ordering::Relaxed),
             assisted: dl.assisted.load(Ordering::Relaxed),
+            assist_pending: dl.assist_pending.load(Ordering::Relaxed),
+            assist_browser: dl.origin_browser.lock().await.clone(),
             segments,
         },
     );
@@ -1189,12 +1213,17 @@ pub async fn begin_download(
         reserved: manager.reserved_paths.clone(),
         assist_eligible: AtomicBool::new(false),
         origin_client: Mutex::new(None),
+        origin_browser: Mutex::new(None),
         external_bytes: AtomicU64::new(0),
         assisted: AtomicBool::new(false),
+        assist_pending: AtomicBool::new(false),
         assist_transfer: Mutex::new(None),
+        assist_pending_transfer: Mutex::new(None),
         last_assist_activity: Mutex::new(Instant::now()),
         assist_last_written: Mutex::new(Instant::now()),
         assist_total: AtomicU64::new(0),
+        assist_last_bytes: AtomicU64::new(0),
+        assist_speed_time: Mutex::new(Instant::now()),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -1269,6 +1298,8 @@ pub async fn cancel_active(manager: &DownloadManager, id: &str) {
     if let Some(dl) = manager.downloads.lock().await.remove(id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
         *dl.assist_transfer.lock().await = None;
+        dl.assist_pending.store(false, Ordering::Relaxed);
+        *dl.assist_pending_transfer.lock().await = None;
         let _ = tokio::fs::remove_file(&dl.file_path).await;
         release_path(&manager.reserved_paths, &dl.file_path).await;
     }
@@ -1299,7 +1330,12 @@ pub async fn assist_begin(
     let _ = File::create(&dl.file_path).await;
     dl.external_bytes.store(0, Ordering::Relaxed);
     dl.assist_total.store(total_bytes, Ordering::Relaxed);
+    dl.speed.store(0, Ordering::Relaxed);
+    dl.assist_last_bytes.store(0, Ordering::Relaxed);
+    *dl.assist_speed_time.lock().await = Instant::now();
     dl.assisted.store(true, Ordering::Relaxed);
+    dl.assist_pending.store(false, Ordering::Relaxed);
+    *dl.assist_pending_transfer.lock().await = None;
     dl.assist_eligible.store(false, Ordering::Relaxed);
     dl.pause_flag.store(false, Ordering::Relaxed);
     dl.cancel_flag.store(false, Ordering::Relaxed);
@@ -1320,15 +1356,14 @@ pub async fn assist_begin(
     Ok(())
 }
 
-/// Write one chunk of assisted data at its absolute offset and emit progress.
-/// Chunks from any transfer other than the active one are rejected.
-pub async fn assist_chunk(
+/// Mark the download as waiting for the browser to become ready. Used while
+/// the extension polls a challenge page; the stream (and the watchdog) does
+/// not start until the browser actually begins sending data.
+pub async fn assist_pending_begin(
     app: &AppHandle,
     manager: &DownloadManager,
     id: &str,
     transfer_id: &str,
-    offset: u64,
-    data: &[u8],
 ) -> Result<(), String> {
     let dl = manager
         .downloads
@@ -1337,6 +1372,26 @@ pub async fn assist_chunk(
         .get(id)
         .cloned()
         .ok_or("download not found")?;
+    // Ignore if a stream is already active.
+    if dl.assist_transfer.lock().await.is_some() {
+        return Ok(());
+    }
+    *dl.assist_pending_transfer.lock().await = Some(transfer_id.to_string());
+    dl.assist_pending.store(true, Ordering::Relaxed);
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+    Ok(())
+}
+
+/// Write one chunk of assisted data at its absolute offset and emit progress.
+/// Chunks from any transfer other than the active one are rejected.
+/// Write one assisted chunk at its absolute offset. Rejects chunks from any
+/// transfer other than the active one, and records activity timestamps.
+async fn apply_assist_chunk(
+    dl: &ActiveDownload,
+    transfer_id: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), String> {
     if dl.assist_transfer.lock().await.as_deref() != Some(transfer_id) {
         return Err("stale transfer".to_string());
     }
@@ -1353,6 +1408,35 @@ pub async fn assist_chunk(
     let end = offset + data.len() as u64;
     dl.external_bytes.fetch_max(end, Ordering::Relaxed);
     *dl.assist_last_written.lock().await = Instant::now();
+
+    // Assisted speed sample (chunks arrive in bursts, so measure per chunk).
+    let now = Instant::now();
+    let mut speed_time = dl.assist_speed_time.lock().await;
+    let dt = now.duration_since(*speed_time).as_secs_f64();
+    let prev = dl.assist_last_bytes.swap(end, Ordering::Relaxed);
+    if dt > 0.0 && end > prev {
+        dl.speed.store(((end - prev) as f64 / dt) as u64, Ordering::Relaxed);
+    }
+    *speed_time = now;
+    Ok(())
+}
+
+pub async fn assist_chunk(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), String> {
+    let dl = manager
+        .downloads
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or("download not found")?;
+    apply_assist_chunk(&dl, transfer_id, offset, data).await?;
     emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
     Ok(())
 }
@@ -1373,6 +1457,8 @@ pub async fn assist_complete(
         return;
     }
     *t = None;
+    dl.assist_pending.store(false, Ordering::Relaxed);
+    *dl.assist_pending_transfer.lock().await = None;
     *dl.status.lock().await = DownloadStatus::Completed;
     drop(t);
     release_path(&dl.reserved, &dl.file_path).await;
@@ -1400,6 +1486,8 @@ pub async fn assist_failed(
     *t = None;
     *dl.last_error.lock().await = Some(message);
     dl.assist_eligible.store(true, Ordering::Relaxed);
+    dl.assist_pending.store(false, Ordering::Relaxed);
+    *dl.assist_pending_transfer.lock().await = None;
     *dl.status.lock().await = DownloadStatus::Error;
     drop(t);
     write_history(manager.hist.as_ref(), &dl).await;
@@ -1466,6 +1554,8 @@ pub async fn remove_download(
     if let Some(dl) = manager.downloads.lock().await.remove(&id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
         *dl.assist_transfer.lock().await = None;
+        dl.assist_pending.store(false, Ordering::Relaxed);
+        *dl.assist_pending_transfer.lock().await = None;
         let _ = tokio::fs::remove_file(&dl.file_path).await;
         release_path(&manager.reserved_paths, &dl.file_path).await;
         persist::delete_state(&state_path(&manager, &id)).await;
@@ -1563,12 +1653,17 @@ pub async fn list_downloads(
             reserved: manager.reserved_paths.clone(),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
             assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             // Re-claim the destination path so new downloads don't collide
@@ -1847,12 +1942,17 @@ mod tests {
             reserved: Arc::new(Mutex::new(HashSet::new())),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
             assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -1919,12 +2019,17 @@ mod tests {
             reserved: Arc::new(Mutex::new(HashSet::new())),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
             assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -2002,12 +2107,17 @@ mod tests {
             reserved: Arc::new(Mutex::new(HashSet::new())),
             assist_eligible: AtomicBool::new(false),
             origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
             external_bytes: AtomicU64::new(0),
             assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
             assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
             assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -2059,6 +2169,67 @@ mod tests {
         }
         let unique: HashSet<PathBuf> = paths.iter().cloned().collect();
         assert_eq!(unique.len(), 8);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// File-integrity regression: assisted chunks written at their offsets must
+    /// reconstruct the exact source bytes, and stale-transfer chunks must be
+    /// rejected without touching the file.
+    #[tokio::test]
+    async fn assisted_chunks_assemble_correct_file() {
+        let dir = std::env::temp_dir().join(format!("velox-assist-test-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file_path = dir.join("result.bin");
+        tokio::fs::write(&file_path, b"").await.unwrap();
+
+        let dl = Arc::new(ActiveDownload {
+            id: "assist".to_string(),
+            url: "https://example.com/file.bin".to_string(),
+            file_path: file_path.clone(),
+            total_size: 0,
+            range_supported: false,
+            segment_count: 1,
+            status: Mutex::new(DownloadStatus::Queued),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            segments: Mutex::new(Vec::new()),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(true),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(Some("t1".to_string())),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
+        });
+
+        let n = DATA.len() / 3;
+        apply_assist_chunk(&dl, "t1", 0, &DATA[0..n]).await.unwrap();
+        apply_assist_chunk(&dl, "t1", n as u64, &DATA[n..2 * n]).await.unwrap();
+        apply_assist_chunk(&dl, "t1", (2 * n) as u64, &DATA[2 * n..]).await.unwrap();
+
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
+        assert_eq!(dl.external_bytes.load(Ordering::Relaxed), DATA.len() as u64);
+
+        // A chunk from a superseded transfer is rejected and leaves the file intact.
+        assert!(apply_assist_chunk(&dl, "other", 0, b"XXXX").await.is_err());
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

@@ -39,6 +39,8 @@ export interface EngineProgress {
   error?: string | null;
   assistEligible?: boolean;
   assisted?: boolean;
+  assistPending?: boolean;
+  assistBrowser?: string | null;
   segments: EngineSegment[];
 }
 

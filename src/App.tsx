@@ -261,6 +261,8 @@ export default function App() {
             errorMessage: p.error ?? null,
             assistEligible: p.assistEligible ?? false,
             assisted: p.assisted ?? false,
+            assistPending: p.assistPending ?? false,
+            assistBrowser: p.assistBrowser ?? null,
           };
           return [item, ...prev];
         }
@@ -278,6 +280,8 @@ export default function App() {
                 errorMessage: p.error ?? null,
                 assistEligible: p.assistEligible ?? d.assistEligible,
                 assisted: p.assisted ?? d.assisted,
+                assistPending: p.assistPending ?? d.assistPending,
+                assistBrowser: p.assistBrowser ?? d.assistBrowser,
                 segments,
               }
             : d

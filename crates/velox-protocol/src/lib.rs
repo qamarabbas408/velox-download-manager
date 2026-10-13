@@ -27,6 +27,7 @@ pub mod kind {
     pub const DOWNLOAD_ACCEPTED: &str = "download_accepted";
     pub const DOWNLOAD_REJECTED: &str = "download_rejected";
     pub const ASSIST_REQUEST: &str = "assist_request";
+    pub const ASSIST_PENDING: &str = "assist_pending";
     pub const ASSIST_STARTED: &str = "assist_started";
     pub const ASSIST_FAILED: &str = "assist_failed";
     pub const CHUNK: &str = "chunk";
@@ -61,6 +62,9 @@ impl<T> Envelope<T> {
 pub struct HelloPayload {
     pub ext_version: String,
     pub client_id: String,
+    /// Browser family label (Chrome / Edge / Brave / Opera), best-effort.
+    #[serde(default)]
+    pub browser: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
