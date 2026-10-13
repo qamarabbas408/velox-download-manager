@@ -118,7 +118,10 @@ async function findOrCreateTab(
   const tabs = await chrome.tabs.query({ url: `${origin}/*` });
   const existing = tabs.find((t) => t.id != null && t.url && sameOrigin(t.url, origin));
   if (existing?.id != null) return { tabId: existing.id, created: false };
-  const created = await chrome.tabs.create({ url: origin, active: false });
+  // Open the origin root (not the file URL) so a document loads — navigating to
+  // the file can make Chrome take over with a download, leaving no page to
+  // fetch from. Focus it so the user can clear any challenge.
+  const created = await chrome.tabs.create({ url: `${origin}/`, active: true });
   return created.id != null ? { tabId: created.id, created: true } : null;
 }
 
@@ -156,6 +159,17 @@ async function assistViaPage(req: AssistRequestPayload): Promise<void> {
       transferId,
       code: "ASSIST_INVALID_URL",
       message: "Invalid URL.",
+    });
+    return;
+  }
+
+  const { assistEnabled } = await chrome.storage.local.get({ assistEnabled: true });
+  if (assistEnabled === false) {
+    postNative(MessageType.ASSIST_FAILED, {
+      downloadId: req.downloadId,
+      transferId,
+      code: "ASSIST_DISABLED",
+      message: "Browser assistance is turned off in the extension.",
     });
     return;
   }
@@ -249,6 +263,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       postNative(MessageType.ASSIST_STARTED, {
         downloadId: msg.downloadId,
         transferId: msg.transferId,
+        totalBytes: msg.totalBytes ?? 0,
       });
       sendResponse({ ok: true });
       break;

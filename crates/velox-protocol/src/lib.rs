@@ -106,6 +106,9 @@ pub struct AssistRequestPayload {
 pub struct AssistStartedPayload {
     pub download_id: String,
     pub transfer_id: String,
+    /// Total size from the browser response, when known (0 = unknown).
+    #[serde(default)]
+    pub total_bytes: u64,
 }
 
 /// One base64-encoded chunk of browser-fetched data, in arrival order.

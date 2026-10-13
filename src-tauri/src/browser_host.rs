@@ -255,7 +255,14 @@ async fn handle_message(
         kind::ASSIST_STARTED => {
             if let Ok(p) = velox_protocol::decode::<AssistStartedPayload>(&env) {
                 let manager = app.state::<DownloadManager>();
-                let _ = assist_begin(app, manager.inner(), &p.download_id, &p.transfer_id).await;
+                let _ = assist_begin(
+                    app,
+                    manager.inner(),
+                    &p.download_id,
+                    &p.transfer_id,
+                    p.total_bytes,
+                )
+                .await;
                 eprintln!("velox browser host: assist started for {}", p.download_id);
             }
         }

@@ -40,6 +40,15 @@ function SegmentIcon({ state }: { state: SegmentInfo["state"] }) {
 }
 
 function SegmentDetail({ item }: { item: DownloadItem }) {
+  if (item.assisted) {
+    return (
+      <div className="rounded-lg bg-signal/10 border border-signal/25 p-3 flex items-center gap-2 text-xs text-muted">
+        <Server className="w-4 h-4 text-signal" />
+        Browser-assisted transfer — your browser supplies the file bytes.
+      </div>
+    );
+  }
+
   if (!item.rangeSupported) {
     return (
       <div className="rounded-lg bg-raised/40 border border-line p-3 flex items-center gap-2 text-xs text-muted">

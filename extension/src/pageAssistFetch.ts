@@ -37,31 +37,55 @@ export async function pageAssistFetch(
   const fail = (code: string, message: string) =>
     send({ type: "velox:assistFailed", downloadId, transferId, code, message });
 
-  let res: Response;
-  try {
-    res = await fetch(url, { credentials: "include" });
-  } catch (e) {
-    await fail("ASSIST_FETCH_FAILED", e instanceof Error ? e.message : String(e));
-    return;
+  const MAX_ATTEMPTS = 60; // ~3 minutes at 3s intervals
+  let res: Response | null = null;
+  let attempts = 0;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    attempts = attempt + 1;
+    let candidate: Response | null = null;
+    try {
+      candidate = await fetch(url, { credentials: "include" });
+    } catch {
+      candidate = null;
+    }
+    if (candidate && candidate.ok && candidate.body) {
+      const c0 = (candidate.headers.get("content-type") || "").toLowerCase();
+      if (!c0.startsWith("text/html")) {
+        res = candidate;
+        break;
+      }
+    }
+    if (candidate?.body) {
+      await candidate.body.cancel().catch(() => {});
+    }
+    // Not ready yet (Cloudflare challenge or sign-in pending). Wait for the
+    // user to finish in the browser, then retry — the browser is where the
+    // interaction happens; Velox just consumes the bytes.
+    await new Promise((r) => setTimeout(r, 3000));
   }
-  if (!res.ok || !res.body) {
-    await fail("ASSIST_FETCH_FAILED", `HTTP ${res.status}`);
+  if (!res || !res.body) {
+    await fail(
+      "ASSIST_NOT_READY",
+      "The site wasn't ready. Complete any check in the browser, then retry."
+    );
     return;
   }
   const ct = (res.headers.get("content-type") || "").toLowerCase();
-  if (ct.startsWith("text/html")) {
-    await fail("ASSIST_CHALLENGE", "Server returned an HTML page.");
-    return;
-  }
   const expected = Number(res.headers.get("content-length") || 0) || 0;
   console.log("[velox assist/page]", {
     finalUrl: res.url,
     status: res.status,
     contentType: ct,
     expected,
+    attempts,
   });
 
-  const started = await send({ type: "velox:assistStarted", downloadId, transferId });
+  const started = await send({
+    type: "velox:assistStarted",
+    downloadId,
+    transferId,
+    totalBytes: expected,
+  });
   if (started.cancelled) return;
 
   const reader = res.body.getReader();
@@ -114,6 +138,9 @@ export async function pageAssistFetch(
     }
     await send({ type: "velox:assistCompleted", downloadId, transferId });
   } catch (e) {
-    await fail("ASSIST_STREAM_FAILED", e instanceof Error ? e.message : String(e));
+    await fail(
+      "ASSIST_STREAM_FAILED",
+      `Stream interrupted after ${offset} bytes: ${e instanceof Error ? e.message : String(e)}`
+    );
   }
 }

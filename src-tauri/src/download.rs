@@ -166,6 +166,9 @@ pub struct ActiveDownload {
     pub last_assist_activity: Mutex<Instant>,
     /// Last time an assisted chunk was fully written (watchdog).
     pub assist_last_written: Mutex<Instant>,
+    /// Total size reported by the browser for the active assisted transfer
+    /// (0 = unknown).
+    pub assist_total: AtomicU64,
 }
 
 pub struct DownloadManager {
@@ -511,7 +514,11 @@ pub(crate) async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, download
             range_supported: dl.range_supported,
             status,
             downloaded_bytes: downloaded,
-            total_bytes: dl.total_size,
+            total_bytes: if dl.assisted.load(Ordering::Relaxed) {
+                dl.assist_total.load(Ordering::Relaxed)
+            } else {
+                dl.total_size
+            },
             speed_bytes_per_sec: dl.speed.load(Ordering::Relaxed),
             error,
             assist_eligible: dl.assist_eligible.load(Ordering::Relaxed),
@@ -1187,6 +1194,7 @@ pub async fn begin_download(
         assist_transfer: Mutex::new(None),
         last_assist_activity: Mutex::new(Instant::now()),
         assist_last_written: Mutex::new(Instant::now()),
+        assist_total: AtomicU64::new(0),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
@@ -1278,6 +1286,7 @@ pub async fn assist_begin(
     manager: &DownloadManager,
     id: &str,
     transfer_id: &str,
+    total_bytes: u64,
 ) -> Result<(), String> {
     let dl = manager
         .downloads
@@ -1289,6 +1298,7 @@ pub async fn assist_begin(
     // Truncate the file so a retry never mixes old bytes with new data.
     let _ = File::create(&dl.file_path).await;
     dl.external_bytes.store(0, Ordering::Relaxed);
+    dl.assist_total.store(total_bytes, Ordering::Relaxed);
     dl.assisted.store(true, Ordering::Relaxed);
     dl.assist_eligible.store(false, Ordering::Relaxed);
     dl.pause_flag.store(false, Ordering::Relaxed);
@@ -1558,6 +1568,7 @@ pub async fn list_downloads(
             assist_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
         });
         if try_restore(&dl, &manager.resume_dir).await {
             // Re-claim the destination path so new downloads don't collide
@@ -1841,6 +1852,7 @@ mod tests {
             assist_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
         });
 
         let client = reqwest::Client::new();
@@ -1912,6 +1924,7 @@ mod tests {
             assist_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
         });
 
         let client = reqwest::Client::new();
@@ -1994,6 +2007,7 @@ mod tests {
             assist_transfer: Mutex::new(None),
             last_assist_activity: Mutex::new(Instant::now()),
             assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
         });
 
         let client = reqwest::Client::new();
