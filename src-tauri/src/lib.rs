@@ -1,6 +1,7 @@
 mod browser_host;
 mod download;
 mod history;
+mod native_host;
 mod persist;
 
 use browser_host::{assist_download, ping_browser};
@@ -91,6 +92,12 @@ pub fn run() {
             let clients = std::sync::Arc::new(browser_host::BrowserClients::new());
             app.manage(clients.clone());
             browser_host::spawn(app.handle().clone(), clients);
+
+            // Register the native-messaging host for installed browsers
+            // (no-op in development, where the shim isn't beside the app).
+            if let Err(e) = native_host::register() {
+                eprintln!("velox: native host registration failed: {e}");
+            }
 
             // Distinguish dev builds from the installed production app.
             #[cfg(debug_assertions)]

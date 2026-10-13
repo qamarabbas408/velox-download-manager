@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-EXT_ID="${1:?usage: register-native-host.sh <extension-id> [debug|release]}"
+EXT_ID="${1:-okdolpgpihdjefkinecghpnjhedjicee}"
 PROFILE="${2:-debug}"
 HOST_NAME="com.velox.native_host"
 
