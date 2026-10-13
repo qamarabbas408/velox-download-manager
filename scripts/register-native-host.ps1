@@ -7,7 +7,7 @@
 #   cargo build --manifest-path crates/velox-native-host/Cargo.toml
 
 param(
-  [string]$ExtensionId = "okdolpgpihdjefkinecghpnjhedjicee",
+  [string]$ExtensionId = "ljgacipalnmcfpnaadgbhmampghkachi",
   [string]$Profile = "debug"
 )
 

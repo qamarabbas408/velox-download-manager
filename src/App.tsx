@@ -621,11 +621,11 @@ export default function App() {
 
       {toast && (
         <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-fade-in">
-          <div className="flex items-center gap-3 bg-raised border border-line rounded-xl px-4 py-3 shadow-2xl">
-            <span className="w-2 h-2 rounded-full bg-signal shrink-0" />
+          <div className="flex items-start gap-3 bg-raised border border-line rounded-xl px-4 py-3 shadow-2xl max-w-md">
+            <span className="w-2 h-2 mt-1.5 rounded-full bg-signal shrink-0" />
             <div className="min-w-0">
               <p className="text-sm text-ink font-medium">{toast.title ?? "New download started"}</p>
-              <p className="text-xs text-dim truncate max-w-[240px]">{toast.label}</p>
+              <p className="text-xs text-dim break-words">{toast.label}</p>
             </div>
             {toast.action === "view" && (
               <button

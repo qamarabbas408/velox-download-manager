@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-EXT_ID="${1:-okdolpgpihdjefkinecghpnjhedjicee}"
+EXT_ID="${1:-ljgacipalnmcfpnaadgbhmampghkachi}"
 PROFILE="${2:-debug}"
 HOST_NAME="com.velox.native_host"
 

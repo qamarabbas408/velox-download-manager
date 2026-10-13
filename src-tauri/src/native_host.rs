@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 pub const HOST_NAME: &str = "com.velox.native_host";
 /// Pinned extension id (derived from the public key in the extension manifest).
-pub const EXTENSION_ID: &str = "okdolpgpihdjefkinecghpnjhedjicee";
+pub const EXTENSION_ID: &str = "ljgacipalnmcfpnaadgbhmampghkachi";
 
 fn shim_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
