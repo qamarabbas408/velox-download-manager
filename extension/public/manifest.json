@@ -3,6 +3,8 @@
   "name": "Velox Browser Integration",
   "description": "Send downloads to Velox, the fast segmented download manager.",
   "version": "0.1.0",
+  "author": "Qamar Abbas (TheDigiOrb)",
+  "homepage_url": "https://thedigiorb.com",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo1dNXUcZTXQaW85PvLwayK88UBt8v0jVOEmMnJJJ65tQoG4fEC6R/Fy7/QohHi4TRLzdigS/2VTWJlzD00a+JdoMnXmjNJ4dhj7wdQLWTWKPFdfJ9KzeestZO4//M6QsPU2wlHAvKc+weZ2oLmiND+WjzB0xLlna/UZYRauaYPituu4UQRG1DVfTsmoef8z1R1RWpkIlZWgbBjKewrit2MAoOM5ecqB47v7pL+QquYECBNbyl/efGAYTkzyr+Oj//5aruATEd5rgnDdCTkrtvhFjhzOAJQnT4Igcpofg3slqpmhDLddNMNncaRjLwxKscCA7p4GKbBlhNr9zkUWlYQIDAQAB",
   "background": {
     "service_worker": "background.js",

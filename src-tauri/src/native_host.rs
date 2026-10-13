@@ -8,8 +8,15 @@
 use std::path::PathBuf;
 
 pub const HOST_NAME: &str = "com.velox.native_host";
-/// Pinned extension id (derived from the public key in the extension manifest).
-pub const EXTENSION_ID: &str = "ljgacipalnmcfpnaadgbhmampghkachi";
+
+/// Extension ids allowed to talk to the host.
+/// - Dev/unpacked: the id derived from the pinned `key` in the manifest.
+/// - Chrome Web Store / Edge Add-ons: the id assigned on first upload (the
+///   store strips `key`), add it here once known.
+const ALLOWED_EXTENSION_IDS: &[&str] = &[
+    "ljgacipalnmcfpnaadgbhmampghkachi", // dev (pinned key)
+    // "STORE_ID_HERE",                  // store-assigned id, fill after upload
+];
 
 fn shim_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -24,12 +31,17 @@ fn shim_path() -> Option<PathBuf> {
 }
 
 fn manifest_text(shim: &PathBuf) -> String {
+    let origins: Vec<String> = ALLOWED_EXTENSION_IDS
+        .iter()
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("chrome-extension://{id}/"))
+        .collect();
     let value = serde_json::json!({
         "name": HOST_NAME,
         "description": "Velox browser integration",
         "path": shim.to_string_lossy(),
         "type": "stdio",
-        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
+        "allowed_origins": origins,
     });
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }

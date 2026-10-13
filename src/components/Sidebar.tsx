@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Settings,
   Sun,
@@ -17,9 +17,11 @@ import {
   Smartphone,
   Image as ImageIcon,
 } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
 import type { SidebarSection } from "../types";
 import { useTheme } from "../theme";
 import { formatBytes } from "../utils/format";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "../assets/logo.png";
 
 const CATEGORY_ICONS: Record<string, React.ElementType> = {
@@ -51,6 +53,13 @@ export function Sidebar({
 }) {
   const { theme, toggleTheme } = useTheme();
   const [libraryOpen, setLibraryOpen] = useState(true);
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
 
   const allSection = sections.find((s) => s.id === "all");
   const usedPercent = storage
@@ -219,6 +228,14 @@ export function Sidebar({
         >
           {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           {theme === "dark" ? "Light theme" : "Dark theme"}
+        </button>
+
+        <button
+          onClick={() => openUrl("https://thedigiorb.com/#contact").catch(() => {})}
+          title="TheDigiOrb — thedigiorb.com"
+          className="w-full text-center text-[10px] text-dim hover:text-muted pt-2 transition-colors"
+        >
+          © TheDigiOrb · Qamar Abbas{version ? ` · v${version}` : ""}
         </button>
         </div>
       </div>

@@ -3,6 +3,8 @@ import type { StatusResponse } from "../types";
 
 type Result = { kind: "ok" | "error"; text: string };
 
+const EXT_VERSION = chrome.runtime.getManifest().version;
+
 export default function App() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<StatusResponse>({
@@ -113,6 +115,11 @@ export default function App() {
         <span>Browser link</span>
         <span>{lastPing ? new Date(lastPing).toLocaleTimeString() : "—"}</span>
       </div>
+
+      <p className="popup__credit">
+        © <a href="https://thedigiorb.com/#contact" target="_blank" rel="noreferrer">TheDigiOrb</a>
+        {" · "}Qamar Abbas{" · "}v{EXT_VERSION}
+      </p>
     </div>
   );
 }
