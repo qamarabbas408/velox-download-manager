@@ -135,6 +135,34 @@ function cleanupAssist(transferId: string): void {
   assistStates.delete(transferId);
 }
 
+/** Map an assist failure code to an actionable, user-facing message. */
+function friendlyMessage(code: string, detail: string | undefined, origin: string | undefined): string {
+  switch (code) {
+    case "ASSIST_DISABLED":
+      return "Browser assistance is turned off in the Velox extension.";
+    case "ASSIST_INVALID_URL":
+      return "That doesn't look like a downloadable URL.";
+    case "ASSIST_NO_TAB":
+      return `Open ${origin ?? "the site"} in a browser tab, then retry.`;
+    case "ASSIST_INJECT_FAILED":
+      return "Couldn't start the browser fetcher. Check the extension's site access, then retry.";
+    case "ASSIST_FETCH_FAILED":
+      return detail && detail.startsWith("HTTP")
+        ? `The browser couldn't fetch the file (${detail}). Open the site and verify access, then retry.`
+        : "The browser couldn't fetch the file. Open the site and verify access, then retry.";
+    case "ASSIST_CHALLENGE":
+      return "The website returned a challenge page instead of the file. Complete the check in the browser, then retry.";
+    case "ASSIST_NOT_READY":
+      return "The website wasn't ready. Complete any check in the browser, then retry.";
+    case "ASSIST_STREAM_FAILED":
+      return "The transfer was interrupted. Retry to restart the download.";
+    case "ASSIST_SIZE_MISMATCH":
+      return "The file couldn't be verified (incomplete response), so it wasn't completed.";
+    default:
+      return "Browser assistance failed. Open the site in your browser and retry.";
+  }
+}
+
 async function waitForComplete(tabId: number, timeoutMs = 15000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -158,7 +186,7 @@ async function assistViaPage(req: AssistRequestPayload): Promise<void> {
       downloadId: req.downloadId,
       transferId,
       code: "ASSIST_INVALID_URL",
-      message: "Invalid URL.",
+      message: friendlyMessage("ASSIST_INVALID_URL", undefined, undefined),
     });
     return;
   }
@@ -169,7 +197,7 @@ async function assistViaPage(req: AssistRequestPayload): Promise<void> {
       downloadId: req.downloadId,
       transferId,
       code: "ASSIST_DISABLED",
-      message: "Browser assistance is turned off in the extension.",
+      message: friendlyMessage("ASSIST_DISABLED", undefined, undefined),
     });
     return;
   }
@@ -185,7 +213,7 @@ async function assistViaPage(req: AssistRequestPayload): Promise<void> {
       downloadId: req.downloadId,
       transferId,
       code: "ASSIST_NO_TAB",
-      message: `Open ${origin} in a browser tab, then retry.`,
+      message: friendlyMessage("ASSIST_NO_TAB", undefined, origin),
     });
     return;
   }
@@ -211,12 +239,12 @@ async function assistViaPage(req: AssistRequestPayload): Promise<void> {
       func: pageAssistFetch,
       args: [req.url, req.downloadId, transferId],
     })
-    .catch((e) => {
+    .catch(() => {
       postNative(MessageType.ASSIST_FAILED, {
         downloadId: req.downloadId,
         transferId,
         code: "ASSIST_INJECT_FAILED",
-        message: e instanceof Error ? e.message : String(e),
+        message: friendlyMessage("ASSIST_INJECT_FAILED", undefined, undefined),
       });
       cleanupAssist(transferId);
     });
@@ -314,11 +342,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: true });
       break;
     case "velox:assistFailed":
+      console.warn("[velox assist]", msg.code, msg.message);
       postNative(MessageType.ASSIST_FAILED, {
         downloadId: msg.downloadId,
         transferId: msg.transferId,
         code: msg.code,
-        message: msg.message,
+        message: friendlyMessage(msg.code, msg.message, undefined),
       });
       cleanupAssist(msg.transferId);
       sendResponse({ ok: true });

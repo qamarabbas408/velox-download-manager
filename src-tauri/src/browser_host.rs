@@ -437,7 +437,9 @@ pub async fn assist_download(
         kind::ASSIST_REQUEST,
         serde_json::to_value(payload).map_err(|e| e.to_string())?,
     );
-    clients.send_to(&client_id, env).await
+    clients.send_to(&client_id, env).await.map_err(|_| {
+        "Open your browser with the Velox extension connected, then retry.".to_string()
+    })
 }
 
 /// Push a ping to one or all connected extension clients (M1 test helper).
