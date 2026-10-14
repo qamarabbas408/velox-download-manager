@@ -2,6 +2,32 @@
 
 All notable changes to Velox are documented in this file.
 
+## [0.6.0] — 2026-10-14
+
+### Added
+- **Browser integration (experimental)** — send a download from Chrome/Edge/Brave
+  to Velox via the Velox browser extension, with a best-effort
+  browser-assisted mode for sites that block non-browser downloads.
+- Destination reservation: downloads can no longer overwrite each other;
+  colliding names get a `(1)` suffix.
+- Duplicate-URL policy: blocked while downloading; when paused, choose to
+  resume the existing download or start another copy.
+- Missing-file detection: completed downloads deleted from disk are flagged.
+- DEV badge and "Velox (Dev)" title in development builds.
+
+### Fixed
+- Range-less / unknown-length downloads now stream to completion.
+- Pause/resume no longer leaves a download stuck on "Downloading" or corrupts
+  the file.
+- A completed download is no longer misreported as failed.
+
+### Changed
+- Credits and version shown in the app sidebar and the extension popup.
+
+### Notes
+- Browser assistance is **experimental**, requires the Velox browser extension,
+  and may not work on every website.
+
 ## [0.5.2] — 2026-08-13
 
 ### Added

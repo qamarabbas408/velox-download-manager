@@ -1,8 +1,8 @@
 [package]
 name = "tauri-app"
-version = "0.5.2"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.6.0"
+description = "Velox — a fast, segmented download manager for Mac & Windows"
+authors = ["Qamar Abbas (TheDigiOrb)"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
