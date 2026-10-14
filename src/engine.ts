@@ -114,6 +114,15 @@ export function assistDownload(id: string): Promise<void> {
   return invoke("assist_download", { id });
 }
 
+export interface BrowserStatus {
+  connected: boolean;
+  browser: string | null;
+}
+
+export function getBrowserStatus(): Promise<BrowserStatus> {
+  return invoke("browser_status");
+}
+
 export function listDownloads(): Promise<ResumeSummary[]> {
   return invoke("list_downloads");
 }

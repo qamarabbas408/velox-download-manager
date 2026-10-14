@@ -181,6 +181,7 @@ export function DownloadDetailDrawer({
   onClose,
   onAssist,
   onDismissAssist,
+  browserConnected,
 }: {
   item: DownloadItem | null;
   history: DownloadSpeedSample[];
@@ -188,6 +189,7 @@ export function DownloadDetailDrawer({
   onClose: () => void;
   onAssist: (item: DownloadItem) => void;
   onDismissAssist: (id: string) => void;
+  browserConnected: boolean;
 }) {
   const [now, setNow] = useState(() => Date.now());
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -353,25 +355,49 @@ export function DownloadDetailDrawer({
             )}
             {item.status === "error" && item.assistEligible && (
               <div className="rounded-lg bg-signal/10 border border-signal/25 px-3 py-3 space-y-2">
-                <p className="text-xs text-signal font-medium">Browser assistance may help</p>
-                <p className="text-[11px] text-muted leading-relaxed">
-                  Velox couldn't download this file directly. You can retry using your browser's
-                  session.
-                </p>
-                <div className="flex items-center gap-2 pt-0.5">
-                  <button
-                    onClick={() => onAssist(item)}
-                    className="btn-primary text-xs font-medium px-3 py-1.5 rounded-md transition-all"
-                  >
-                    Retry with Browser
-                  </button>
-                  <button
-                    onClick={() => onDismissAssist(item.id)}
-                    className="text-xs px-2 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
-                  >
-                    Dismiss
-                  </button>
+                <div className="flex items-center gap-2">
+                  <p className="text-xs text-signal font-medium">Browser assistance may help</p>
+                  <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-paused/50 text-paused">
+                    Experimental
+                  </span>
                 </div>
+                {browserConnected ? (
+                  <>
+                    <p className="text-[11px] text-muted leading-relaxed">
+                      Velox couldn't download this file directly. Retry using your browser's
+                      session. Requires the Velox browser extension and may not work on every site.
+                    </p>
+                    <div className="flex items-center gap-2 pt-0.5">
+                      <button
+                        onClick={() => onAssist(item)}
+                        className="btn-primary text-xs font-medium px-3 py-1.5 rounded-md transition-all"
+                      >
+                        Retry with Browser
+                      </button>
+                      <button
+                        onClick={() => onDismissAssist(item.id)}
+                        className="text-xs px-2 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-muted leading-relaxed">
+                      This requires the Velox browser extension. Install it in Chrome/Edge, then
+                      retry.
+                    </p>
+                    <div className="flex items-center gap-2 pt-0.5">
+                      <button
+                        onClick={() => onDismissAssist(item.id)}
+                        className="text-xs px-2 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
             {item.status === "error" && item.errorMessage && (

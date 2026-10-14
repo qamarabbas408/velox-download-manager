@@ -442,6 +442,25 @@ pub async fn assist_download(
     })
 }
 
+/// Whether a browser extension client is currently connected.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserStatus {
+    pub connected: bool,
+    pub browser: Option<String>,
+}
+
+#[tauri::command]
+pub async fn browser_status(
+    clients: tauri::State<'_, Arc<BrowserClients>>,
+) -> Result<BrowserStatus, String> {
+    let reg = clients.0.lock().await;
+    Ok(BrowserStatus {
+        connected: !reg.is_empty(),
+        browser: reg.values().next().map(|e| e.browser.clone()),
+    })
+}
+
 /// Push a ping to one or all connected extension clients (M1 test helper).
 #[tauri::command]
 pub async fn ping_browser(

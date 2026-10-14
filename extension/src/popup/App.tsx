@@ -108,7 +108,7 @@ export default function App() {
 
       <label className="toggle">
         <input type="checkbox" checked={assist} onChange={toggleAssist} />
-        <span>Browser assistance for protected sites</span>
+        <span>Browser assistance for protected sites (experimental)</span>
       </label>
 
       <div className="popup__footer">

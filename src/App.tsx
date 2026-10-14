@@ -20,6 +20,7 @@ import {
   getMissingFiles,
   getStorageStats,
   getDefaultDownloadDir,
+  getBrowserStatus,
   assistDownload,
   isTauri,
   listDownloads,
@@ -60,6 +61,7 @@ export default function App() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ id: string; label: string; title?: string; action?: "view" } | null>(null);
   const [inProgressUnseen, setInProgressUnseen] = useState(false);
+  const [browserConnected, setBrowserConnected] = useState(false);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
@@ -107,12 +109,26 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  const refreshBrowser = useCallback(() => {
+    if (!isTauri) return;
+    getBrowserStatus()
+      .then((s) => setBrowserConnected(s.connected))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!isTauri) return;
-    const onFocus = () => refreshMissing();
+    const onFocus = () => {
+      refreshMissing();
+      refreshBrowser();
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [refreshMissing]);
+  }, [refreshMissing, refreshBrowser]);
+
+  useEffect(() => {
+    if (detailId) refreshBrowser();
+  }, [detailId, refreshBrowser]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -201,6 +217,7 @@ export default function App() {
       .finally(() => {
         initialLoadDoneRef.current = true;
         refreshMissing();
+        refreshBrowser();
       });
     onDownloadProgress((p) => {
       if (p.status === "completed") refreshStorage(downloadDirRef.current);
@@ -617,6 +634,7 @@ export default function App() {
         onClose={closeDetailDrawer}
         onAssist={handleAssist}
         onDismissAssist={dismissAssist}
+        browserConnected={browserConnected}
       />
 
       {toast && (

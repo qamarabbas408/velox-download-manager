@@ -4,7 +4,7 @@ mod history;
 mod native_host;
 mod persist;
 
-use browser_host::{assist_download, ping_browser};
+use browser_host::{assist_download, browser_status, ping_browser};
 use download::{cancel_download, get_history, list_downloads, missing_files, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, start_download_copy, DownloadManager};
 use serde::Serialize;
 use tauri::Manager;
@@ -124,6 +124,7 @@ pub fn run() {
             set_max_connections,
             ping_browser,
             assist_download,
+            browser_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
