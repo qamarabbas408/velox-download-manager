@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Settings,
   Sun,
@@ -17,9 +17,11 @@ import {
   Smartphone,
   Image as ImageIcon,
 } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
 import type { SidebarSection } from "../types";
 import { useTheme } from "../theme";
 import { formatBytes } from "../utils/format";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "../assets/logo.png";
 
 const CATEGORY_ICONS: Record<string, React.ElementType> = {
@@ -40,15 +42,24 @@ export function Sidebar({
   onSelect,
   onOpenSettings,
   storage,
+  highlightId,
 }: {
   sections: SidebarSection[];
   activeId: string;
   onSelect: (id: string) => void;
   onOpenSettings: () => void;
   storage: { totalBytes: number; usedBytes: number } | null;
+  highlightId?: string | null;
 }) {
   const { theme, toggleTheme } = useTheme();
   const [libraryOpen, setLibraryOpen] = useState(true);
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
 
   const allSection = sections.find((s) => s.id === "all");
   const usedPercent = storage
@@ -69,6 +80,14 @@ export function Sidebar({
             Download manager
           </span>
         </div>
+        {import.meta.env.DEV && (
+          <span
+            title="Development build"
+            className="ml-auto self-start text-[9px] font-semibold tracking-widest px-1.5 py-0.5 rounded border border-paused/50 text-paused"
+          >
+            DEV
+          </span>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 pr-1 -mr-1">
@@ -143,6 +162,9 @@ export function Sidebar({
             >
               <Icon className="w-4 h-4" />
               <span className="flex-1 text-left">{section.label}</span>
+              {highlightId === section.id && (
+                <span className="w-2 h-2 rounded-full bg-signal animate-pulse" />
+              )}
               <span className="font-mono text-xs text-dim">{section.count}</span>
             </button>
           );
@@ -206,6 +228,14 @@ export function Sidebar({
         >
           {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           {theme === "dark" ? "Light theme" : "Dark theme"}
+        </button>
+
+        <button
+          onClick={() => openUrl("https://thedigiorb.com/#contact").catch(() => {})}
+          title="TheDigiOrb — thedigiorb.com"
+          className="w-full text-center text-[10px] text-dim hover:text-muted pt-2 transition-colors"
+        >
+          © TheDigiOrb · Qamar Abbas{version ? ` · v${version}` : ""}
         </button>
         </div>
       </div>

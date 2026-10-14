@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowRight, X } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { DownloadsTable } from "./components/DownloadsTable";
@@ -16,8 +17,11 @@ import {
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "./store";
 import {
   getHistory,
+  getMissingFiles,
   getStorageStats,
   getDefaultDownloadDir,
+  getBrowserStatus,
+  assistDownload,
   isTauri,
   listDownloads,
   onDownloadProgress,
@@ -55,9 +59,13 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; names: string[] } | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ id: string; label: string; title?: string; action?: "view" } | null>(null);
+  const [inProgressUnseen, setInProgressUnseen] = useState(false);
+  const [browserConnected, setBrowserConnected] = useState(false);
   const downloadDirRef = useRef(settings.downloadDir);
   const lastManualTabRef = useRef("all");
   const activeIdRef = useRef(activeId);
+  const initialLoadDoneRef = useRef(false);
   const notifiedIdsRef = useRef<Set<string>>(new Set());
   const downloadsRef = useRef<DownloadItem[]>(downloads);
   const downloadHistoryRef = useRef<Map<string, DownloadSpeedSample[]>>(new Map());
@@ -74,12 +82,53 @@ export default function App() {
     downloadDirRef.current = settings.downloadDir;
   }, [settings.downloadDir]);
 
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(id);
+  }, [toast]);
+
   const refreshStorage = useCallback((dir: string) => {
     if (!isTauri) return;
     getStorageStats(dir)
       .then((s) => setStorage({ totalBytes: s.totalBytes, usedBytes: s.usedBytes }))
       .catch(() => {});
   }, []);
+
+  const refreshMissing = useCallback(() => {
+    if (!isTauri) return;
+    getMissingFiles()
+      .then((ids) => {
+        const set = new Set(ids);
+        setDownloads((prev) =>
+          prev.map((d) =>
+            d.status === "completed" ? { ...d, missing: set.has(d.id) } : d
+          )
+        );
+      })
+      .catch(() => {});
+  }, []);
+
+  const refreshBrowser = useCallback(() => {
+    if (!isTauri) return;
+    getBrowserStatus()
+      .then((s) => setBrowserConnected(s.connected))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    const onFocus = () => {
+      refreshMissing();
+      refreshBrowser();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshMissing, refreshBrowser]);
+
+  useEffect(() => {
+    if (detailId) refreshBrowser();
+  }, [detailId, refreshBrowser]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -164,7 +213,12 @@ export default function App() {
           });
         });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        initialLoadDoneRef.current = true;
+        refreshMissing();
+        refreshBrowser();
+      });
     onDownloadProgress((p) => {
       if (p.status === "completed") refreshStorage(downloadDirRef.current);
       if (p.status === "error" && ["all", "in-progress", "error"].includes(activeIdRef.current)) {
@@ -181,6 +235,12 @@ export default function App() {
           else notifyDownloadFailed(item.name, item.extension);
         }
       }
+      // A download started outside the UI (e.g. the browser extension).
+      const isNewExternal = !downloadsRef.current.some((d) => d.id === p.id);
+      if (isNewExternal && initialLoadDoneRef.current) {
+        setToast({ id: p.id, label: `${p.name}.${p.extension}`, title: "New download started", action: "view" });
+        if (activeIdRef.current !== "in-progress") setInProgressUnseen(true);
+      }
       setDownloads((prev) => {
         const segments: SegmentInfo[] = p.segments.map((s) => ({
           index: s.index,
@@ -189,19 +249,56 @@ export default function App() {
           downloaded: s.current - s.start,
           state: s.state,
         }));
+        const eta =
+          p.totalBytes > 0 && p.speedBytesPerSec > 0
+            ? Math.round((p.totalBytes - p.downloadedBytes) / p.speedBytesPerSec)
+            : null;
         const existing = prev.find((d) => d.id === p.id);
-        if (!existing) return prev;
-        const remaining = p.totalBytes - p.downloadedBytes;
-        const eta = p.speedBytesPerSec > 0 ? Math.round(remaining / p.speedBytesPerSec) : null;
+        const resolvedSize =
+          p.totalBytes > 0
+            ? p.totalBytes
+            : toStatus(p.status) === "completed"
+              ? p.downloadedBytes
+              : null;
+        if (!existing) {
+          // A download started outside the UI (e.g. from the browser extension).
+          const item: DownloadItem = {
+            id: p.id,
+            name: p.name,
+            extension: p.extension,
+            sizeBytes: resolvedSize ?? 0,
+            downloadedBytes: p.downloadedBytes,
+            speedBytesPerSec: p.speedBytesPerSec,
+            etaSeconds: eta,
+            status: toStatus(p.status),
+            rangeSupported: p.rangeSupported,
+            segments,
+            source: p.source,
+            downloadDir: p.downloadDir,
+            errorMessage: p.error ?? null,
+            assistEligible: p.assistEligible ?? false,
+            assisted: p.assisted ?? false,
+            assistPending: p.assistPending ?? false,
+            assistBrowser: p.assistBrowser ?? null,
+          };
+          return [item, ...prev];
+        }
         return prev.map((d) =>
           d.id === p.id
             ? {
                 ...d,
+                name: p.name,
+                extension: p.extension,
                 status: toStatus(p.status),
+                sizeBytes: resolvedSize ?? d.sizeBytes,
                 downloadedBytes: p.downloadedBytes,
                 speedBytesPerSec: p.speedBytesPerSec,
                 etaSeconds: eta,
                 errorMessage: p.error ?? null,
+                assistEligible: p.assistEligible ?? d.assistEligible,
+                assisted: p.assisted ?? d.assisted,
+                assistPending: p.assistPending ?? d.assistPending,
+                assistBrowser: p.assistBrowser ?? d.assistBrowser,
                 segments,
               }
             : d
@@ -241,6 +338,12 @@ export default function App() {
   const handleSelectTab = (id: string) => {
     lastManualTabRef.current = id;
     setActiveId(id);
+    if (id === "in-progress") setInProgressUnseen(false);
+  };
+
+  const showInProgress = () => {
+    handleSelectTab("in-progress");
+    setToast(null);
   };
 
   const inProgressCount =
@@ -339,6 +442,31 @@ export default function App() {
     if (isTauri) revealDownload(item.downloadDir, item.name, item.extension).catch(() => {});
   };
 
+  const handleAssist = (item: DownloadItem) => {
+    if (!isTauri) return;
+    assistDownload(item.id)
+      .then(() =>
+        setToast({
+          id: item.id,
+          label: `${item.name}.${item.extension}`,
+          title: "Browser assistance requested",
+        })
+      )
+      .catch((e) =>
+        setToast({
+          id: item.id,
+          label: String(e),
+          title: "Browser assistance unavailable",
+        })
+      );
+  };
+
+  const dismissAssist = (id: string) => {
+    setDownloads((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, assistEligible: false } : d))
+    );
+  };
+
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -380,13 +508,13 @@ export default function App() {
 
   const handleDeleteSelected = () => {
     const selected = visibleDownloads.filter((d) => selectedIds.has(d.id));
-    const completed = selected.filter((d) => d.status === "completed");
-    const others = selected.filter((d) => d.status !== "completed");
-    others.forEach((d) => handleRemove(d.id));
-    if (completed.length > 0) {
+    const withFile = selected.filter((d) => d.status === "completed" && !d.missing);
+    const plain = selected.filter((d) => !(d.status === "completed" && !d.missing));
+    plain.forEach((d) => handleRemove(d.id));
+    if (withFile.length > 0) {
       setPendingDelete({
-        ids: completed.map((d) => d.id),
-        names: completed.map((d) => `${d.name}.${d.extension}`),
+        ids: withFile.map((d) => d.id),
+        names: withFile.map((d) => `${d.name}.${d.extension}`),
       });
     }
     setSelectedIds(new Set());
@@ -399,7 +527,7 @@ export default function App() {
       next.delete(id);
       return next;
     });
-    if (item && item.status === "completed") {
+    if (item && item.status === "completed" && !item.missing) {
       setPendingDelete({
         ids: [id],
         names: [`${item.name}.${item.extension}`],
@@ -425,6 +553,7 @@ export default function App() {
         onSelect={handleSelectTab}
         onOpenSettings={() => setIsSettingsOpen(true)}
         storage={storage}
+        highlightId={inProgressUnseen ? "in-progress" : null}
       />
 
       <main className="flex-1 flex flex-col min-w-0">
@@ -479,8 +608,10 @@ export default function App() {
         open={isAddOpen}
         settings={settings}
         activeConnections={activeConnections}
+        downloads={downloads}
         onClose={() => setIsAddOpen(false)}
         onAdd={addDownload}
+        onResume={handleResume}
       />
 
       <SettingsModal
@@ -501,7 +632,38 @@ export default function App() {
         history={detailId ? downloadHistoryRef.current.get(detailId) ?? [] : []}
         modalOpen={isAddOpen || isSettingsOpen}
         onClose={closeDetailDrawer}
+        onAssist={handleAssist}
+        onDismissAssist={dismissAssist}
+        browserConnected={browserConnected}
       />
+
+      {toast && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-fade-in">
+          <div className="flex items-start gap-3 bg-raised border border-line rounded-xl px-4 py-3 shadow-2xl max-w-md">
+            <span className="w-2 h-2 mt-1.5 rounded-full bg-signal shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm text-ink font-medium">{toast.title ?? "New download started"}</p>
+              <p className="text-xs text-dim break-words">{toast.label}</p>
+            </div>
+            {toast.action === "view" && (
+              <button
+                onClick={showInProgress}
+                className="flex items-center gap-1 text-signal text-sm font-medium hover:underline shrink-0"
+              >
+                View
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+            <button
+              onClick={() => setToast(null)}
+              aria-label="Dismiss"
+              className="text-dim hover:text-ink shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,20 +22,28 @@ const MAX_SEGMENT_RETRIES: u32 = 12;
 const RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Maximum time to wait for a chunk before considering the connection stalled.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time an assisted transfer may go without a chunk before it is
+/// marked failed (covers SW sleep, dropped port, or a closed page).
+const ASSIST_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_CONN: usize = 32;
 
 #[derive(Debug)]
 struct SegmentError {
     message: String,
     retriable: bool,
+    /// True when the failure looks like one browser assistance could solve
+    /// (auth/forbidden/rate-limit responses).
+    assist: bool,
 }
 
 impl SegmentError {
     fn permanent(msg: String) -> Self {
-        Self { message: msg, retriable: false }
+        Self { message: msg, retriable: false, assist: false }
     }
     fn transient(msg: String) -> Self {
-        Self { message: msg, retriable: true }
+        Self { message: msg, retriable: true, assist: false }
     }
 }
 
@@ -87,11 +95,22 @@ pub struct SegmentState {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadProgress {
     pub id: String,
+    pub name: String,
+    pub extension: String,
+    pub source: String,
+    pub download_dir: String,
+    pub range_supported: bool,
     pub status: DownloadStatus,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
     pub speed_bytes_per_sec: u64,
     pub error: Option<String>,
+    pub assist_eligible: bool,
+    pub assisted: bool,
+    /// True while waiting for the browser to become ready (polling).
+    pub assist_pending: bool,
+    /// Browser label supplying the assisted transfer (e.g. "Chrome").
+    pub assist_browser: Option<String>,
     pub segments: Vec<SegmentState>,
 }
 
@@ -110,6 +129,10 @@ pub struct ResumeSummary {
     pub progress_percent: u64,
 }
 
+/// Destination paths currently reserved by in-flight downloads, so two
+/// independent downloads can never write to the same file.
+pub type ReservedPaths = Arc<Mutex<HashSet<PathBuf>>>;
+
 pub struct ActiveDownload {
     pub id: String,
     pub url: String,
@@ -126,6 +149,41 @@ pub struct ActiveDownload {
     pub speed: AtomicU64,
     pub last_state_flush: Mutex<Instant>,
     pub conn_pool: Arc<Semaphore>,
+    /// Serializes runs for the same download so a resumed run cannot start
+    /// until any previous run has fully stopped touching the file.
+    pub run_lock: Mutex<()>,
+    /// Incremented on each (re)start; a run whose generation is stale exits.
+    pub generation: AtomicU64,
+    /// Shared destination-path registry this download participates in.
+    pub reserved: ReservedPaths,
+    /// Set when the failure is one browser assistance could plausibly solve.
+    pub assist_eligible: AtomicBool,
+    /// The browser client that submitted this download (extension path only).
+    pub origin_client: Mutex<Option<String>>,
+    /// Browser label of the originating client (e.g. "Chrome").
+    pub origin_browser: Mutex<Option<String>>,
+    /// Bytes received via browser assistance (not from the native engine).
+    pub external_bytes: AtomicU64,
+    /// True once a download is being fulfilled via browser assistance.
+    pub assisted: AtomicBool,
+    /// True while waiting for the browser to become ready (polling) — the
+    /// watchdog is suspended in this phase.
+    pub assist_pending: AtomicBool,
+    /// The active assisted-transfer id (guards against stale/duplicate chunks).
+    pub assist_transfer: Mutex<Option<String>>,
+    /// Transfer id of a pending (not yet streaming) assist request.
+    pub assist_pending_transfer: Mutex<Option<String>>,
+    /// Last time an assisted chunk was received (watchdog).
+    pub last_assist_activity: Mutex<Instant>,
+    /// Last time an assisted chunk was fully written (watchdog).
+    pub assist_last_written: Mutex<Instant>,
+    /// Total size reported by the browser for the active assisted transfer
+    /// (0 = unknown).
+    pub assist_total: AtomicU64,
+    /// Bytes total at the last assisted speed sample.
+    pub assist_last_bytes: AtomicU64,
+    /// Time of the last assisted speed sample.
+    pub assist_speed_time: Mutex<Instant>,
 }
 
 pub struct DownloadManager {
@@ -135,6 +193,7 @@ pub struct DownloadManager {
     pub conn_pool: Arc<Semaphore>,
     pub max_conn: AtomicUsize,
     downloads: Mutex<HashMap<String, Arc<ActiveDownload>>>,
+    pub reserved_paths: ReservedPaths,
 }
 
 impl DownloadManager {
@@ -146,7 +205,33 @@ impl DownloadManager {
             conn_pool: Arc::new(Semaphore::new(DEFAULT_MAX_CONN)),
             max_conn: AtomicUsize::new(DEFAULT_MAX_CONN),
             downloads: Mutex::new(HashMap::new()),
+            reserved_paths: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Associate an active download with the browser client that submitted it.
+    pub async fn set_origin_client(&self, id: &str, client_id: Option<String>) {
+        if let Some(dl) = self.downloads.lock().await.get(id).cloned() {
+            *dl.origin_client.lock().await = client_id;
+        }
+    }
+
+    /// Record the browser label of the originating client.
+    pub async fn set_origin_browser(&self, id: &str, browser: Option<String>) {
+        if let Some(dl) = self.downloads.lock().await.get(id).cloned() {
+            *dl.origin_browser.lock().await = browser;
+        }
+    }
+
+    /// Returns (url, origin_client, assist_eligible) for a download.
+    pub async fn assist_info(&self, id: &str) -> Option<(String, Option<String>, bool)> {
+        let dl = self.downloads.lock().await.get(id).cloned()?;
+        let origin = dl.origin_client.lock().await.clone();
+        Some((
+            dl.url.clone(),
+            origin,
+            dl.assist_eligible.load(Ordering::Relaxed),
+        ))
     }
 }
 
@@ -266,7 +351,7 @@ fn derive_filename(url: &str, content_disposition: Option<&str>) -> (String, Str
     }
 }
 
-async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, String> {
+pub async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResult, String> {
     let head = client
         .head(url)
         .timeout(PROBE_TIMEOUT)
@@ -399,29 +484,69 @@ async fn update_segment_current(dl: &ActiveDownload, index: usize, current: u64)
     }
 }
 
+/// Reset every unfinished segment to `idle` so it will be rescheduled. Called
+/// whenever a run stops without completing (pause, error, supersede).
+async fn reset_unfinished_segments(dl: &ActiveDownload) {
+    for s in dl.segments.lock().await.iter_mut() {
+        if s.state != "done" {
+            s.state = "idle";
+        }
+    }
+}
+
 async fn aggregate(dl: &ActiveDownload) -> (u64, bool) {
     let segs = dl.segments.lock().await;
     let downloaded = segs
         .iter()
         .map(|s| s.current.saturating_sub(s.start))
         .sum();
-    let done = segs.iter().all(|s| s.current >= s.end);
+    // Completion is driven by segment state, not by comparing offsets to `end`.
+    // This also handles unbounded (unknown-length) segments whose `end` is 0.
+    let done = !segs.is_empty() && segs.iter().all(|s| s.state == "done");
     (downloaded, done)
 }
 
-async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
+pub(crate) async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
     let status = *dl.status.lock().await;
     let segments = dl.segments.lock().await.clone();
     let error = dl.last_error.lock().await.clone();
+    let name = dl
+        .file_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let extension = dl
+        .file_path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bin".to_string());
+    let download_dir = dl
+        .file_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let _ = app.emit(
         "download://progress",
         DownloadProgress {
             id: dl.id.clone(),
+            name,
+            extension,
+            source: dl.url.clone(),
+            download_dir,
+            range_supported: dl.range_supported,
             status,
             downloaded_bytes: downloaded,
-            total_bytes: dl.total_size,
+            total_bytes: if dl.assisted.load(Ordering::Relaxed) {
+                dl.assist_total.load(Ordering::Relaxed)
+            } else {
+                dl.total_size
+            },
             speed_bytes_per_sec: dl.speed.load(Ordering::Relaxed),
             error,
+            assist_eligible: dl.assist_eligible.load(Ordering::Relaxed),
+            assisted: dl.assisted.load(Ordering::Relaxed),
+            assist_pending: dl.assist_pending.load(Ordering::Relaxed),
+            assist_browser: dl.origin_browser.lock().await.clone(),
             segments,
         },
     );
@@ -580,13 +705,17 @@ async fn run_segment_inner(
 
     let end = seg.end;
     let mut current = seg.current;
+    // Some servers omit Content-Length and ignore Range (returning 200). Stream
+    // those responses to EOF in a single unbounded segment instead of failing.
+    let unbounded = dl.total_size == 0;
+    let accept_full = unbounded || !dl.range_supported;
 
     file.seek(SeekFrom::Start(current))
         .await
         .map_err(|e| SegmentError::permanent(format!("seek failed: {e}")))?;
 
-    let range = if end >= dl.total_size {
-        format!("bytes={}-", current)
+    let range = if unbounded || end >= dl.total_size {
+        format!("bytes={current}-")
     } else {
         format!("bytes={}-{}", current, end.saturating_sub(1))
     };
@@ -599,39 +728,97 @@ async fn run_segment_inner(
         .map_err(|e| SegmentError::transient(format!("range request failed: {e}")))?;
 
     let status = resp.status();
-    if status != StatusCode::PARTIAL_CONTENT {
+    if status != StatusCode::PARTIAL_CONTENT && !(accept_full && status == StatusCode::OK) {
         let retriable = status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
             || status == StatusCode::SERVICE_UNAVAILABLE;
+        // Auth/forbidden/rate-limit responses are candidates for browser
+        // assistance (the browser session may satisfy them).
+        let assist = status == StatusCode::UNAUTHORIZED
+            || status == StatusCode::FORBIDDEN
+            || status == StatusCode::TOO_MANY_REQUESTS;
         let detail = describe_http_status(resp).await;
         return Err(SegmentError {
             message: format!("download rejected by server{detail}"),
             retriable,
+            assist,
         });
     }
 
+    // A 200 that is actually an HTML interstitial (bot/anti-bot challenge) is
+    // a prime candidate for browser assistance.
+    let target_is_html = dl
+        .file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            e == "html" || e == "htm"
+        })
+        .unwrap_or(false);
+    if !target_is_html {
+        if let Some(ct) = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase())
+        {
+            if ct.starts_with("text/html") {
+                return Err(SegmentError {
+                    message: "server returned an HTML page instead of the file (possible bot check)"
+                        .to_string(),
+                    retriable: false,
+                    assist: true,
+                });
+            }
+        }
+    }
+
     let mut stream = resp.bytes_stream();
-    while current < end {
+    loop {
         if dl.pause_flag.load(Ordering::Relaxed) || dl.cancel_flag.load(Ordering::Relaxed) {
             break;
         }
-        match stream.next().await {
-            Some(Ok(chunk)) => {
-                let room = (end - current) as usize;
-                let n = chunk.len().min(room);
+        if !unbounded && current >= end {
+            break;
+        }
+        match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                let n = if unbounded {
+                    chunk.len()
+                } else {
+                    chunk.len().min((end - current) as usize)
+                };
+                if n == 0 {
+                    continue;
+                }
                 if file.write_all(&chunk[..n]).await.is_err() {
                     break;
                 }
                 current += n as u64;
                 update_segment_current(&dl, seg.index, current).await;
             }
-            Some(Err(e)) => return Err(SegmentError::transient(format!("stream error: {e}"))),
-            None => break,
+            Ok(Some(Err(e))) => return Err(SegmentError::transient(format!("stream error: {e}"))),
+            Ok(None) => break,
+            Err(_) => {
+                // No chunk arrived within the stall window. Treat a genuine
+                // stall as transient so it can be retried, but distinguish it
+                // from a slow-but-progressing connection (each received chunk
+                // resets the timer).
+                if dl.pause_flag.load(Ordering::Relaxed) || dl.cancel_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                return Err(SegmentError::transient(format!(
+                    "connection stalled (no data for {}s)",
+                    STALL_TIMEOUT.as_secs()
+                )));
+            }
         }
     }
 
-    if current >= end {
+    let stopped = dl.pause_flag.load(Ordering::Relaxed) || dl.cancel_flag.load(Ordering::Relaxed);
+    if !stopped && (unbounded || current >= end) {
         set_segment_state(&dl, seg.index, "done").await;
     } else {
         set_segment_state(&dl, seg.index, "idle").await;
@@ -656,13 +843,26 @@ async fn run_download_inner(
     resume_dir: &std::path::Path,
     hist: Option<&history::HistoryPool>,
 ) {
+    let my_gen = dl.generation.load(Ordering::Relaxed);
+    // Serialize runs per download: a resumed run waits here until any previous
+    // run has fully stopped before touching the file or segments.
+    let _run_guard = dl.run_lock.lock().await;
+    if dl.generation.load(Ordering::Relaxed) != my_gen {
+        return;
+    }
+
     {
         let segs = dl.segments.lock().await;
-        let fresh = segs.is_empty();
+        // Re-download from scratch when the server can't serve byte ranges: a
+        // partial "resume" would issue a Range request the server ignores,
+        // corrupting the file. Range-capable downloads still resume.
+        let fresh = segs.is_empty() || !dl.range_supported;
         drop(segs);
         if fresh {
-            if dl.total_size > 0 {
-                if let Ok(f) = File::create(&dl.file_path).await {
+            // Always create the target file. When the size is known we preallocate;
+            // for unknown-length responses the file grows as we stream to EOF.
+            if let Ok(f) = File::create(&dl.file_path).await {
+                if dl.total_size > 0 {
                     let _ = f.set_len(dl.total_size).await;
                 }
             }
@@ -690,6 +890,14 @@ async fn run_download_inner(
     loop {
         if dl.cancel_flag.load(Ordering::Relaxed) {
             break;
+        }
+        if dl.generation.load(Ordering::Relaxed) != my_gen {
+            // Superseded by a newer run (e.g. pause+resume raced). Stop fully
+            // so the new run owns the download and the file.
+            join.abort_all();
+            while join.join_next().await.is_some() {}
+            reset_unfinished_segments(&dl).await;
+            return;
         }
 
         let pending: Vec<SegmentState> = {
@@ -737,6 +945,9 @@ async fn run_download_inner(
 
                 if *dl.status.lock().await == DownloadStatus::Error {
                     join.abort_all();
+                    while join.join_next().await.is_some() {}
+                    reset_unfinished_segments(&dl).await;
+                    release_path(&dl.reserved, &dl.file_path).await;
                     write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
@@ -745,12 +956,9 @@ async fn run_download_inner(
                 }
                 if dl.pause_flag.load(Ordering::Relaxed) {
                     join.abort_all();
+                    while join.join_next().await.is_some() {}
                     *dl.status.lock().await = DownloadStatus::Paused;
-                    for s in dl.segments.lock().await.iter_mut() {
-                        if s.current < s.end {
-                            s.state = "idle";
-                        }
-                    }
+                    reset_unfinished_segments(&dl).await;
                     // Flush final offsets on pause even if under the interval.
                     persist_state_quiet(resume_dir, &dl).await;
                     write_history(hist, &dl).await;
@@ -762,6 +970,7 @@ async fn run_download_inner(
                 if done && join.is_empty() {
                     *dl.status.lock().await = DownloadStatus::Completed;
                     persist::delete_state(&persist::state_path(resume_dir, &dl.id)).await;
+                    release_path(&dl.reserved, &dl.file_path).await;
                     write_history(hist, &dl).await;
                     if let Some(app) = app {
                         emit_progress(app, &dl, downloaded).await;
@@ -791,11 +1000,29 @@ async fn run_download_inner(
                     };
                     let give_up = attempts >= MAX_SEGMENT_RETRIES || !err.retriable;
                     if give_up {
+                        if err.assist {
+                            dl.assist_eligible.store(true, Ordering::Relaxed);
+                        }
                         *dl.last_error.lock().await = Some(err.message);
                         *dl.status.lock().await = DownloadStatus::Error;
                         write_history(hist, &dl).await;
                     } else {
-                        set_segment_state(&dl, index, "idle").await;
+                        if dl.range_supported {
+                            set_segment_state(&dl, index, "idle").await;
+                        } else {
+                            // Range-less servers can't resume a segment, so
+                            // restart it from the beginning (truncating the
+                            // file) instead of appending at the failed offset.
+                            if let Some(s) = dl.segments.lock().await.iter_mut().find(|s| s.index == index) {
+                                s.current = s.start;
+                                s.state = "idle";
+                            }
+                            if let Ok(f) = File::create(&dl.file_path).await {
+                                if dl.total_size > 0 {
+                                    let _ = f.set_len(dl.total_size).await;
+                                }
+                            }
+                        }
                         let backoff = RETRY_BACKOFF * (1u32 << attempts.min(4));
                         tokio::time::sleep(backoff).await;
                         if let Some(app) = app {
@@ -808,10 +1035,12 @@ async fn run_download_inner(
     }
 
     join.abort_all();
+    while join.join_next().await.is_some() {}
     if dl.cancel_flag.load(Ordering::Relaxed) {
         return;
     }
     *dl.status.lock().await = DownloadStatus::Error;
+    release_path(&dl.reserved, &dl.file_path).await;
     if let Some(app) = app {
         emit_progress(app, &dl, aggregate(&dl).await.0).await;
     }
@@ -827,7 +1056,124 @@ pub async fn start_download(
     app: AppHandle,
     manager: State<'_, DownloadManager>,
     request: StartRequest,
-) -> Result<(), String> {
+) -> Result<(), StartErrorDto> {
+    begin_download(&app, manager.inner(), request, false)
+        .await
+        .map_err(|e| e.to_dto())
+}
+
+/// Start a download explicitly as an additional copy, bypassing paused-URL
+/// deduplication (the destination is still uniquely reserved).
+#[tauri::command]
+pub async fn start_download_copy(
+    app: AppHandle,
+    manager: State<'_, DownloadManager>,
+    request: StartRequest,
+) -> Result<(), StartErrorDto> {
+    begin_download(&app, manager.inner(), request, true)
+        .await
+        .map_err(|e| e.to_dto())
+}
+
+/// Why a download could not be started.
+#[derive(Debug)]
+pub enum StartError {
+    /// The same URL is already actively downloading.
+    DuplicateActive,
+    /// The same URL exists but is paused.
+    DuplicatePaused,
+}
+
+impl StartError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            StartError::DuplicateActive => "ALREADY_DOWNLOADING",
+            StartError::DuplicatePaused => "ALREADY_PAUSED",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            StartError::DuplicateActive => "This URL is already downloading.".to_string(),
+            StartError::DuplicatePaused => {
+                "This download is paused in Velox. Resume it there, or download another copy."
+                    .to_string()
+            }
+        }
+    }
+
+    pub fn to_dto(&self) -> StartErrorDto {
+        StartErrorDto {
+            code: self.code().to_string(),
+            message: self.message(),
+        }
+    }
+}
+
+/// Serializable start failure returned to the frontend (Tauri commands).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartErrorDto {
+    pub code: String,
+    pub message: String,
+}
+
+/// Reserve the first available destination path for `name.extension` in `dir`,
+/// accounting for files already on disk and paths reserved by in-flight
+/// downloads. Returns the chosen path and the (possibly suffixed) name.
+async fn reserve_path(
+    dir: &Path,
+    name: &str,
+    extension: &str,
+    reserved: &ReservedPaths,
+) -> (PathBuf, String) {
+    let mut set = reserved.lock().await;
+    let mut candidate_name = name.to_string();
+    let mut index = 0u32;
+    loop {
+        let candidate = dir.join(format!("{candidate_name}.{extension}"));
+        if !candidate.exists() && !set.contains(&candidate) {
+            set.insert(candidate.clone());
+            return (candidate, candidate_name);
+        }
+        index += 1;
+        candidate_name = format!("{name} ({index})");
+    }
+}
+
+async fn release_path(reserved: &ReservedPaths, path: &Path) {
+    reserved.lock().await.remove(path);
+}
+
+/// Shared entry point for starting a segmented download. Used by both the
+/// `start_download` Tauri command and the browser-integration IPC host.
+pub async fn begin_download(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    request: StartRequest,
+    force: bool,
+) -> Result<(), StartError> {
+    // Active-URL deduplication, shared by the UI and the extension. Actively
+    // downloading URLs always block; paused URLs block unless the caller
+    // explicitly requests another copy (`force`). Completed and errored
+    // records never block.
+    {
+        let downloads = manager.downloads.lock().await;
+        for d in downloads.values() {
+            if d.url == request.url {
+                match *d.status.lock().await {
+                    DownloadStatus::Downloading | DownloadStatus::Queued => {
+                        return Err(StartError::DuplicateActive)
+                    }
+                    DownloadStatus::Paused if !force => {
+                        return Err(StartError::DuplicatePaused)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let download_dir = if request.download_dir.trim().is_empty() {
         app.path()
             .download_dir()
@@ -837,7 +1183,13 @@ pub async fn start_download(
     } else {
         PathBuf::from(&request.download_dir)
     };
-    let file_path = download_dir.join(format!("{}.{}", request.name, request.extension));
+    let (file_path, _final_name) = reserve_path(
+        &download_dir,
+        &request.name,
+        &request.extension,
+        &manager.reserved_paths,
+    )
+    .await;
     let max_conn = manager.max_conn.load(Ordering::Relaxed).max(1);
 
     let dl = Arc::new(ActiveDownload {
@@ -856,18 +1208,34 @@ pub async fn start_download(
         speed: AtomicU64::new(0),
         last_state_flush: Mutex::new(Instant::now()),
         conn_pool: manager.conn_pool.clone(),
+        run_lock: Mutex::new(()),
+        generation: AtomicU64::new(0),
+        reserved: manager.reserved_paths.clone(),
+        assist_eligible: AtomicBool::new(false),
+        origin_client: Mutex::new(None),
+        origin_browser: Mutex::new(None),
+        external_bytes: AtomicU64::new(0),
+        assisted: AtomicBool::new(false),
+        assist_pending: AtomicBool::new(false),
+        assist_transfer: Mutex::new(None),
+        assist_pending_transfer: Mutex::new(None),
+        last_assist_activity: Mutex::new(Instant::now()),
+        assist_last_written: Mutex::new(Instant::now()),
+        assist_total: AtomicU64::new(0),
+        assist_last_bytes: AtomicU64::new(0),
+        assist_speed_time: Mutex::new(Instant::now()),
     });
 
     let restored = try_restore(&dl, &manager.resume_dir).await;
     if !restored {
-        let _ = persist::delete_state(&state_path(&manager, &request.id)).await;
+        let _ = persist::delete_state(&state_path(manager, &request.id)).await;
     }
 
     manager.downloads.lock().await.insert(request.id, dl.clone());
     let client = manager.client.clone();
     let resume_dir = manager.resume_dir.clone();
     let hist = manager.hist.clone();
-    tauri::async_runtime::spawn(run_download(app, dl, client, resume_dir, hist));
+    tauri::async_runtime::spawn(run_download(app.clone(), dl, client, resume_dir, hist));
     Ok(())
 }
 
@@ -904,6 +1272,9 @@ pub async fn resume_download(
     dl.cancel_flag.store(false, Ordering::Relaxed);
     dl.retries.lock().await.clear();
     *dl.last_error.lock().await = None;
+    // Supersede any in-flight run for this download; it will stop and release
+    // the run lock before this new run touches the file.
+    dl.generation.fetch_add(1, Ordering::Relaxed);
     let client = manager.client.clone();
     let resume_dir = manager.resume_dir.clone();
     let hist = manager.hist.clone();
@@ -916,21 +1287,258 @@ pub async fn cancel_download(
     manager: State<'_, DownloadManager>,
     id: String,
 ) -> Result<(), String> {
+    cancel_active(manager.inner(), &id).await;
+    Ok(())
+}
+
+/// Cancel an active download: stop it, delete the partial file, drop any resume
+/// state, and remove the history row. Shared by the `cancel_download` command
+/// and the browser-integration host.
+pub async fn cancel_active(manager: &DownloadManager, id: &str) {
+    if let Some(dl) = manager.downloads.lock().await.remove(id) {
+        dl.cancel_flag.store(true, Ordering::Relaxed);
+        *dl.assist_transfer.lock().await = None;
+        dl.assist_pending.store(false, Ordering::Relaxed);
+        *dl.assist_pending_transfer.lock().await = None;
+        let _ = tokio::fs::remove_file(&dl.file_path).await;
+        release_path(&manager.reserved_paths, &dl.file_path).await;
+    }
+    persist::delete_state(&state_path(manager, id)).await;
+    if let Some(pool) = &manager.hist {
+        let _ = history::delete_history(pool, id).await;
+    }
+}
+
+/// Begin a browser-assisted transfer: reset the destination file and mark the
+/// download as downloading. Assisted transfers are not resumable, so any
+/// previous bytes are discarded.
+pub async fn assist_begin(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+    total_bytes: u64,
+) -> Result<(), String> {
     let dl = manager
         .downloads
         .lock()
         .await
-        .get(&id)
+        .get(id)
         .cloned()
         .ok_or("download not found")?;
-    dl.cancel_flag.store(true, Ordering::Relaxed);
-    let _ = tokio::fs::remove_file(&dl.file_path).await;
-    persist::delete_state(&state_path(&manager, &id)).await;
-    if let Some(pool) = &manager.hist {
-        let _ = history::delete_history(pool, &id).await;
-    }
-    manager.downloads.lock().await.remove(&id);
+    // Truncate the file so a retry never mixes old bytes with new data.
+    let _ = File::create(&dl.file_path).await;
+    dl.external_bytes.store(0, Ordering::Relaxed);
+    dl.assist_total.store(total_bytes, Ordering::Relaxed);
+    dl.speed.store(0, Ordering::Relaxed);
+    dl.assist_last_bytes.store(0, Ordering::Relaxed);
+    *dl.assist_speed_time.lock().await = Instant::now();
+    dl.assisted.store(true, Ordering::Relaxed);
+    dl.assist_pending.store(false, Ordering::Relaxed);
+    *dl.assist_pending_transfer.lock().await = None;
+    dl.assist_eligible.store(false, Ordering::Relaxed);
+    dl.pause_flag.store(false, Ordering::Relaxed);
+    dl.cancel_flag.store(false, Ordering::Relaxed);
+    let now = Instant::now();
+    *dl.assist_transfer.lock().await = Some(transfer_id.to_string());
+    *dl.last_assist_activity.lock().await = now;
+    *dl.assist_last_written.lock().await = now;
+    *dl.last_error.lock().await = None;
+    *dl.status.lock().await = DownloadStatus::Downloading;
+    write_history(manager.hist.as_ref(), &dl).await;
+    emit_progress(app, &dl, 0).await;
+    tauri::async_runtime::spawn(supervise_assist(
+        app.clone(),
+        dl.clone(),
+        manager.hist.clone(),
+        transfer_id.to_string(),
+    ));
     Ok(())
+}
+
+/// Mark the download as waiting for the browser to become ready. Used while
+/// the extension polls a challenge page; the stream (and the watchdog) does
+/// not start until the browser actually begins sending data.
+pub async fn assist_pending_begin(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+) -> Result<(), String> {
+    let dl = manager
+        .downloads
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or("download not found")?;
+    // Ignore if a stream is already active.
+    if dl.assist_transfer.lock().await.is_some() {
+        return Ok(());
+    }
+    *dl.assist_pending_transfer.lock().await = Some(transfer_id.to_string());
+    dl.assist_pending.store(true, Ordering::Relaxed);
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+    Ok(())
+}
+
+/// Write one chunk of assisted data at its absolute offset and emit progress.
+/// Chunks from any transfer other than the active one are rejected.
+/// Write one assisted chunk at its absolute offset. Rejects chunks from any
+/// transfer other than the active one, and records activity timestamps.
+async fn apply_assist_chunk(
+    dl: &ActiveDownload,
+    transfer_id: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), String> {
+    if dl.assist_transfer.lock().await.as_deref() != Some(transfer_id) {
+        return Err("stale transfer".to_string());
+    }
+    *dl.last_assist_activity.lock().await = Instant::now();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&dl.file_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|e| e.to_string())?;
+    file.write_all(data).await.map_err(|e| e.to_string())?;
+    let end = offset + data.len() as u64;
+    dl.external_bytes.fetch_max(end, Ordering::Relaxed);
+    *dl.assist_last_written.lock().await = Instant::now();
+
+    // Assisted speed sample (chunks arrive in bursts, so measure per chunk).
+    let now = Instant::now();
+    let mut speed_time = dl.assist_speed_time.lock().await;
+    let dt = now.duration_since(*speed_time).as_secs_f64();
+    let prev = dl.assist_last_bytes.swap(end, Ordering::Relaxed);
+    if dt > 0.0 && end > prev {
+        dl.speed.store(((end - prev) as f64 / dt) as u64, Ordering::Relaxed);
+    }
+    *speed_time = now;
+    Ok(())
+}
+
+pub async fn assist_chunk(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), String> {
+    let dl = manager
+        .downloads
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or("download not found")?;
+    apply_assist_chunk(&dl, transfer_id, offset, data).await?;
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+    Ok(())
+}
+
+/// Finalize an assisted transfer. Ignored if the active transfer has already
+/// been superseded (retry), failed, or cleared by the watchdog.
+pub async fn assist_complete(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+) {
+    let Some(dl) = manager.downloads.lock().await.get(id).cloned() else {
+        return;
+    };
+    let mut t = dl.assist_transfer.lock().await;
+    if t.as_deref() != Some(transfer_id) {
+        return;
+    }
+    *t = None;
+    dl.assist_pending.store(false, Ordering::Relaxed);
+    *dl.assist_pending_transfer.lock().await = None;
+    *dl.status.lock().await = DownloadStatus::Completed;
+    drop(t);
+    release_path(&dl.reserved, &dl.file_path).await;
+    persist::delete_state(&state_path(manager, id)).await;
+    write_history(manager.hist.as_ref(), &dl).await;
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+}
+
+/// Mark an assisted transfer as failed. Ignored if superseded. The download
+/// stays eligible so the user can retry.
+pub async fn assist_failed(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    id: &str,
+    transfer_id: &str,
+    message: String,
+) {
+    let Some(dl) = manager.downloads.lock().await.get(id).cloned() else {
+        return;
+    };
+    let mut t = dl.assist_transfer.lock().await;
+    if t.as_deref() != Some(transfer_id) {
+        return;
+    }
+    *t = None;
+    *dl.last_error.lock().await = Some(message);
+    dl.assist_eligible.store(true, Ordering::Relaxed);
+    dl.assist_pending.store(false, Ordering::Relaxed);
+    *dl.assist_pending_transfer.lock().await = None;
+    *dl.status.lock().await = DownloadStatus::Error;
+    drop(t);
+    write_history(manager.hist.as_ref(), &dl).await;
+    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+}
+
+/// Watchdog for assisted transfers. If no chunk arrives within the stall
+/// window (service worker slept, port dropped, or the page was closed), the
+/// download is marked failed and becomes eligible for another retry instead of
+/// sitting on "Downloading" forever.
+async fn supervise_assist(
+    app: AppHandle,
+    dl: Arc<ActiveDownload>,
+    hist: Option<history::HistoryPool>,
+    transfer_id: String,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Activity = the most recent of "chunk received" and "chunk written",
+        // so a slow producer or a slow writer are both distinguished from a
+        // genuinely idle transfer.
+        let received = dl.last_assist_activity.lock().await.elapsed();
+        let written = dl.assist_last_written.lock().await.elapsed();
+        if received.min(written) < ASSIST_STALL_TIMEOUT {
+            continue;
+        }
+
+        // Serialize with completion/failure/retry: verify the transfer is
+        // still the active one and still downloading before committing.
+        let mut t = dl.assist_transfer.lock().await;
+        if t.as_deref() != Some(transfer_id.as_str()) {
+            return;
+        }
+        if *dl.status.lock().await != DownloadStatus::Downloading {
+            return;
+        }
+        *t = None;
+        *dl.status.lock().await = DownloadStatus::Error;
+        drop(t);
+
+        dl.assist_eligible.store(true, Ordering::Relaxed);
+        *dl.last_error.lock().await = Some(format!(
+            "Browser assistance stalled (no data for {}s). Open the site and retry.",
+            ASSIST_STALL_TIMEOUT.as_secs()
+        ));
+        release_path(&dl.reserved, &dl.file_path).await;
+        write_history(hist.as_ref(), &dl).await;
+        emit_progress(&app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+        return;
+    }
 }
 
 // Remove a download from the list entirely — whether it is currently active or
@@ -945,7 +1553,11 @@ pub async fn remove_download(
 ) -> Result<(), String> {
     if let Some(dl) = manager.downloads.lock().await.remove(&id) {
         dl.cancel_flag.store(true, Ordering::Relaxed);
+        *dl.assist_transfer.lock().await = None;
+        dl.assist_pending.store(false, Ordering::Relaxed);
+        *dl.assist_pending_transfer.lock().await = None;
         let _ = tokio::fs::remove_file(&dl.file_path).await;
+        release_path(&manager.reserved_paths, &dl.file_path).await;
         persist::delete_state(&state_path(&manager, &id)).await;
     } else {
         // Might be a history entry only — still clear any orphaned file/state.
@@ -1036,8 +1648,27 @@ pub async fn list_downloads(
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: manager.conn_pool.clone(),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: manager.reserved_paths.clone(),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
         if try_restore(&dl, &manager.resume_dir).await {
+            // Re-claim the destination path so new downloads don't collide
+            // with this resumed one.
+            manager.reserved_paths.lock().await.insert(dl.file_path.clone());
             let id = dl.id.clone();
             active.insert(id.clone(), dl.clone());
             let client = manager.client.clone();
@@ -1088,6 +1719,28 @@ pub async fn get_history(
     }
 
     Ok(rows)
+}
+
+/// Return the ids of completed downloads whose file is no longer present on
+/// disk (e.g. deleted or moved outside Velox). Used to flag stale entries.
+#[tauri::command]
+pub async fn missing_files(manager: State<'_, DownloadManager>) -> Result<Vec<String>, String> {
+    let Some(pool) = &manager.hist else {
+        return Ok(Vec::new());
+    };
+    let rows = history::fetch_history(pool, 500)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut missing = Vec::new();
+    for row in rows {
+        if row.status != "completed" {
+            continue;
+        }
+        if !history::file_path(&row).exists() {
+            missing.push(row.id);
+        }
+    }
+    Ok(missing)
 }
 
 /// Resize the global connection pool at runtime (e.g. when the user saves a
@@ -1284,6 +1937,22 @@ mod tests {
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -1345,6 +2014,22 @@ mod tests {
             speed: AtomicU64::new(0),
             last_state_flush: Mutex::new(Instant::now()),
             conn_pool: Arc::new(Semaphore::new(2)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
         });
 
         let client = reqwest::Client::new();
@@ -1357,5 +2042,195 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
         handle.abort();
+    }
+
+    /// A server that omits Content-Length and ignores Range (Cloudflare/Ezoic
+    /// style) must still download by streaming the 200 response to EOF.
+    #[tokio::test]
+    async fn unknown_length_download_completes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let data = DATA.to_vec();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                let data = data.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 2048];
+                    let mut req = String::new();
+                    loop {
+                        let n = match stream.read(&mut buf).await {
+                            Ok(n) => n,
+                            Err(_) => return,
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        req.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if req.contains("\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    // 200 with no Content-Length and no Accept-Ranges; close to signal EOF.
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = stream.write_all(&data).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let dir = std::env::temp_dir().join(format!("velox-nolen-test-{}", std::process::id()));
+        let file_path = dir.join("result.bin");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let dl = Arc::new(ActiveDownload {
+            id: "nolen".to_string(),
+            url: format!("{base}/file.bin"),
+            file_path: file_path.clone(),
+            total_size: 0,
+            range_supported: false,
+            segment_count: 1,
+            status: Mutex::new(DownloadStatus::Queued),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            segments: Mutex::new(Vec::new()),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
+        });
+
+        let client = reqwest::Client::new();
+        run_download_inner(None, dl.clone(), client, &dir, None).await;
+
+        assert_eq!(*dl.status.lock().await, DownloadStatus::Completed);
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn reserve_path_uniquifies_on_disk_and_reserved() {
+        let dir = std::env::temp_dir().join(format!("velox-reserve-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let reserved: ReservedPaths = Arc::new(Mutex::new(HashSet::new()));
+
+        let (p0, n0) = reserve_path(&dir, "file", "bin", &reserved).await;
+        assert_eq!(n0, "file");
+        let (p1, n1) = reserve_path(&dir, "file", "bin", &reserved).await;
+        assert_eq!(n1, "file (1)");
+        assert_ne!(p0, p1);
+
+        // A file on disk forces a suffix even without an active reservation.
+        tokio::fs::write(&p0, b"x").await.unwrap();
+        let (_, n2) = reserve_path(&dir, "file", "bin", &reserved).await;
+        assert_eq!(n2, "file (2)");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn reserve_path_is_atomic_under_concurrency() {
+        let dir = std::env::temp_dir().join(format!("velox-reserve-c-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let reserved: ReservedPaths = Arc::new(Mutex::new(HashSet::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let d = dir.clone();
+            let r = reserved.clone();
+            handles.push(tokio::spawn(async move { reserve_path(&d, "f", "bin", &r).await.0 }));
+        }
+        let mut paths = Vec::new();
+        for h in handles {
+            paths.push(h.await.unwrap());
+        }
+        let unique: HashSet<PathBuf> = paths.iter().cloned().collect();
+        assert_eq!(unique.len(), 8);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// File-integrity regression: assisted chunks written at their offsets must
+    /// reconstruct the exact source bytes, and stale-transfer chunks must be
+    /// rejected without touching the file.
+    #[tokio::test]
+    async fn assisted_chunks_assemble_correct_file() {
+        let dir = std::env::temp_dir().join(format!("velox-assist-test-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file_path = dir.join("result.bin");
+        tokio::fs::write(&file_path, b"").await.unwrap();
+
+        let dl = Arc::new(ActiveDownload {
+            id: "assist".to_string(),
+            url: "https://example.com/file.bin".to_string(),
+            file_path: file_path.clone(),
+            total_size: 0,
+            range_supported: false,
+            segment_count: 1,
+            status: Mutex::new(DownloadStatus::Queued),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            segments: Mutex::new(Vec::new()),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(true),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(Some("t1".to_string())),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
+        });
+
+        let n = DATA.len() / 3;
+        apply_assist_chunk(&dl, "t1", 0, &DATA[0..n]).await.unwrap();
+        apply_assist_chunk(&dl, "t1", n as u64, &DATA[n..2 * n]).await.unwrap();
+        apply_assist_chunk(&dl, "t1", (2 * n) as u64, &DATA[2 * n..]).await.unwrap();
+
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
+        assert_eq!(dl.external_bytes.load(Ordering::Relaxed), DATA.len() as u64);
+
+        // A chunk from a superseded transfer is rejected and leaves the file intact.
+        assert!(apply_assist_chunk(&dl, "other", 0, b"XXXX").await.is_err());
+        let got = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(got, DATA);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

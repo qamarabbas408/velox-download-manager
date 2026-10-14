@@ -19,4 +19,4 @@ Grab the latest installer from the [Releases](https://github.com/qamarabbas408/v
 
 ## Credits
 
-Crafted by [TheDigiOrb](https://thedigiorb.com/).
+Copyright © Qamar Abbas — [TheDigiOrb](https://thedigiorb.com/#contact).
