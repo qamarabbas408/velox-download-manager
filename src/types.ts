@@ -34,6 +34,11 @@ export interface DownloadItem {
   source: string;
   downloadDir: string;
   errorMessage?: string | null;
+  missing?: boolean;
+  assistEligible?: boolean;
+  assisted?: boolean;
+  assistPending?: boolean;
+  assistBrowser?: string | null;
 }
 
 export interface SidebarSection {

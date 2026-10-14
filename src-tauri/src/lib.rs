@@ -1,8 +1,11 @@
+mod browser_host;
 mod download;
 mod history;
+mod native_host;
 mod persist;
 
-use download::{cancel_download, get_history, list_downloads, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, DownloadManager};
+use browser_host::{assist_download, browser_status, ping_browser};
+use download::{cancel_download, get_history, list_downloads, missing_files, pause_download, probe_url, remove_download, resume_download, set_max_connections, start_download, start_download_copy, DownloadManager};
 use serde::Serialize;
 use tauri::Manager;
 
@@ -86,12 +89,29 @@ pub fn run() {
             let db_path = data_dir.join("downloads.sqlite");
             let hist = tauri::async_runtime::block_on(history::open_pool(&db_path)).ok();
             app.manage(DownloadManager::new(resume_dir, hist));
+            let clients = std::sync::Arc::new(browser_host::BrowserClients::new());
+            app.manage(clients.clone());
+            browser_host::spawn(app.handle().clone(), clients);
+
+            // Register the native-messaging host for installed browsers
+            // (no-op in development, where the shim isn't beside the app).
+            if let Err(e) = native_host::register() {
+                eprintln!("velox: native host registration failed: {e}");
+            }
+
+            // Distinguish dev builds from the installed production app.
+            #[cfg(debug_assertions)]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title("Velox (Dev)");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
             probe_url,
             start_download,
+            start_download_copy,
             get_storage_stats,
             default_download_dir,
             pause_download,
@@ -100,7 +120,11 @@ pub fn run() {
             remove_download,
             list_downloads,
             get_history,
+            missing_files,
             set_max_connections,
+            ping_browser,
+            assist_download,
+            browser_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

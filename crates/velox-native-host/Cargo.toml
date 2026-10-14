@@ -1,0 +1,13 @@
+[package]
+name = "velox-native-host"
+version = "0.1.0"
+edition = "2021"
+description = "Chrome Native Messaging host shim that forwards to the running Velox app"
+
+[[bin]]
+name = "velox-native-host"
+path = "src/main.rs"
+
+[dependencies]
+velox-protocol = { path = "../velox-protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "net", "macros"] }

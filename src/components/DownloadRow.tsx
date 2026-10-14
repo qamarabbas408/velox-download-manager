@@ -20,6 +20,8 @@ const statusLabel: Record<DownloadStatus, string> = {
 
 function RowActions({
   status,
+  missing,
+  waiting,
   onPause,
   onResume,
   onRetry,
@@ -27,6 +29,8 @@ function RowActions({
   onRemove,
 }: {
   status: DownloadStatus;
+  missing?: boolean;
+  waiting?: boolean;
   onPause: () => void;
   onResume: () => void;
   onRetry: () => void;
@@ -46,12 +50,12 @@ function RowActions({
           <Play className="w-4 h-4" />
         </button>
       )}
-      {status === "error" && (
+      {status === "error" && !waiting && (
         <button className={btn} aria-label="Retry download" onClick={onRetry}>
           <RotateCw className="w-4 h-4" />
         </button>
       )}
-      {status === "completed" && (
+      {status === "completed" && !missing && (
         <button className={btn} aria-label="Show in folder" onClick={onReveal}>
           <FolderOpen className="w-4 h-4" />
         </button>
@@ -82,6 +86,7 @@ export function DownloadRow({
 }) {
   const progress = progressPercent(item);
   const activeSegments = item.segments.filter((s) => s.state === "active").length;
+  const waiting = item.assistPending === true;
 
   return (
     <div
@@ -105,13 +110,26 @@ export function DownloadRow({
 
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1.5">
-            <p className="font-body text-sm text-ink truncate">
+            <p className={`font-body text-sm truncate ${item.missing ? "text-dim line-through" : "text-ink"}`}>
               {item.name}
               <span className="text-dim">.{item.extension}</span>
             </p>
-            {item.rangeSupported && (
+            {item.missing && (
+              <span
+                className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-danger/15 text-danger"
+                title="File not found on disk"
+              >
+                File missing
+              </span>
+            )}
+            {item.rangeSupported && !item.missing && (
               <span className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-raised text-dim" title="Server supports byte ranges">
                 segmented
+              </span>
+            )}
+            {item.assisted && !item.missing && (
+              <span className="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-signal/15 text-signal" title="Fetched via browser assistance">
+                browser-assisted{item.assistBrowser ? ` · ${item.assistBrowser}` : ""}
               </span>
             )}
           </div>
@@ -124,7 +142,10 @@ export function DownloadRow({
           />
 
           <div className="flex items-center gap-3 mt-1.5 font-mono text-[11px] text-muted">
-            <span>{formatBytes(item.downloadedBytes)} / {formatBytes(item.sizeBytes)}</span>
+            <span>
+              {formatBytes(item.downloadedBytes)}
+              {item.sizeBytes > 0 ? ` / ${formatBytes(item.sizeBytes)}` : " downloaded"}
+            </span>
             <span className="text-dim">·</span>
             <span>{formatSpeed(item.speedBytesPerSec)}</span>
             <span className="text-dim">·</span>
@@ -136,7 +157,13 @@ export function DownloadRow({
               </>
             )}
           </div>
-          {item.status === "error" && item.errorMessage && (
+          {waiting && (
+            <p className="mt-1.5 text-[11px] text-signal/90 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-signal animate-pulse" />
+              Waiting for the browser… complete any check there.
+            </p>
+          )}
+          {item.status === "error" && !waiting && item.errorMessage && (
             <p className="mt-1.5 font-mono text-[11px] text-danger/90 truncate">
               {item.errorMessage}
             </p>
@@ -144,11 +171,13 @@ export function DownloadRow({
         </div>
 
         <div className="flex flex-col items-end gap-1.5 shrink-0">
-          <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${item.status === "downloading" ? "bg-signal/15 text-signal" : item.status === "paused" ? "bg-paused/15 text-paused" : item.status === "completed" ? "bg-complete/15 text-complete" : item.status === "error" ? "bg-danger/15 text-danger" : "bg-dim/20 text-muted"}`}>
-            {statusLabel[item.status]}
+          <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${waiting ? "bg-signal/15 text-signal" : item.status === "downloading" ? "bg-signal/15 text-signal" : item.status === "paused" ? "bg-paused/15 text-paused" : item.status === "completed" ? "bg-complete/15 text-complete" : item.status === "error" ? "bg-danger/15 text-danger" : "bg-dim/20 text-muted"}`}>
+            {waiting ? "Waiting for browser" : statusLabel[item.status]}
           </span>
           <RowActions
             status={item.status}
+            missing={item.missing}
+            waiting={waiting}
             onPause={onPause}
             onResume={onResume}
             onRetry={onRetry}

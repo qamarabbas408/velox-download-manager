@@ -27,11 +27,20 @@ export interface EngineSegment {
 
 export interface EngineProgress {
   id: string;
+  name: string;
+  extension: string;
+  source: string;
+  downloadDir: string;
+  rangeSupported: boolean;
   status: "queued" | "downloading" | "paused" | "completed" | "error";
   downloadedBytes: number;
   totalBytes: number;
   speedBytesPerSec: number;
   error?: string | null;
+  assistEligible?: boolean;
+  assisted?: boolean;
+  assistPending?: boolean;
+  assistBrowser?: string | null;
   segments: EngineSegment[];
 }
 
@@ -79,6 +88,11 @@ export function startDownload(req: StartRequest): Promise<void> {
   return invoke("start_download", { request: req });
 }
 
+/// Start an explicit additional copy, bypassing paused-URL deduplication.
+export function startDownloadCopy(req: StartRequest): Promise<void> {
+  return invoke("start_download_copy", { request: req });
+}
+
 export function pauseDownload(id: string): Promise<void> {
   return invoke("pause_download", { id });
 }
@@ -95,12 +109,30 @@ export function removeDownload(id: string, deleteFile = false): Promise<void> {
   return invoke("remove_download", { id, deleteFile });
 }
 
+/// Ask the browser (via the extension) to assist an eligible failed download.
+export function assistDownload(id: string): Promise<void> {
+  return invoke("assist_download", { id });
+}
+
+export interface BrowserStatus {
+  connected: boolean;
+  browser: string | null;
+}
+
+export function getBrowserStatus(): Promise<BrowserStatus> {
+  return invoke("browser_status");
+}
+
 export function listDownloads(): Promise<ResumeSummary[]> {
   return invoke("list_downloads");
 }
 
 export function getHistory(): Promise<HistoryRow[]> {
   return invoke("get_history");
+}
+
+export function getMissingFiles(): Promise<string[]> {
+  return invoke("missing_files");
 }
 
 export function getStorageStats(downloadDir: string): Promise<StorageStats> {
