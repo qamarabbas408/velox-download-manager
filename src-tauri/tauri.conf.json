@@ -4,9 +4,9 @@
   "version": "0.5.2",
   "identifier": "com.qabbas715.velox",
   "build": {
-    "beforeDevCommand": "bash scripts/build-native-host.sh && npm run dev",
+    "beforeDevCommand": "node scripts/build-native-host.mjs && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bash scripts/build-native-host.sh && npm run build",
+    "beforeBuildCommand": "node scripts/build-native-host.mjs && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
