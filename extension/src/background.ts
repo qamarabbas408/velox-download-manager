@@ -1,42 +1,40 @@
 import {
   handshake,
   postNative,
+  reconnect,
+  refreshStatus,
   setAckBridge,
   setAssistBridge,
   setCancelBridge,
-  status,
   submit,
 } from "./nativeClient";
 import { MessageType } from "./types";
 import type { AssistRequestPayload } from "./types";
 import { pageAssistFetch } from "./pageAssistFetch";
-
-const MENU_ID = "velox-download-link";
-
-const DEFAULT_ICON = {
-  "16": "icons/16.png",
-  "32": "icons/32.png",
-  "48": "icons/48.png",
-  "128": "icons/128.png",
-};
-const GREEN_ICON = {
-  "16": "icons/green/16.png",
-  "32": "icons/green/32.png",
-  "48": "icons/green/48.png",
-  "128": "icons/green/128.png",
-};
+import {
+  ASSIST_TAB_LOAD_TIMEOUT_MS,
+  BADGE_ERROR_COLOR,
+  BADGE_RESET_MS,
+  BADGE_SUCCESS_COLOR,
+  CHUNK_ACK_TIMEOUT_MS,
+  CONTEXT_MENU_ID,
+  DEFAULT_ICONS,
+  GREEN_ICONS,
+} from "./constants";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function flashError(): void {
   try {
-    chrome.action.setBadgeBackgroundColor({ color: "#f0533d" });
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_ERROR_COLOR });
     chrome.action.setBadgeText({ text: "!" });
-    chrome.action.setTitle({ title: "Velox: request failed" });
+    chrome.action.setTitle({
+      title: "Velox: request failed — open the Velox extension popup for help",
+    });
     setTimeout(() => {
       chrome.action.setBadgeText({ text: "" });
       chrome.action.setTitle({ title: "Velox" });
-    }, 4000);
+    }, BADGE_RESET_MS);
   } catch {
     // badge is best-effort
   }
@@ -44,20 +42,20 @@ function flashError(): void {
 
 async function flashSuccess(): Promise<void> {
   try {
-    chrome.action.setBadgeBackgroundColor({ color: "#33d6a6" });
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_SUCCESS_COLOR });
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setTitle({ title: "Velox: added to queue" });
 
     // Flicker the toolbar icon green a few times, then settle briefly.
     for (let i = 0; i < 3; i++) {
-      await chrome.action.setIcon({ path: GREEN_ICON });
+      await chrome.action.setIcon({ path: GREEN_ICONS });
       await sleep(160);
-      await chrome.action.setIcon({ path: DEFAULT_ICON });
+      await chrome.action.setIcon({ path: DEFAULT_ICONS });
       await sleep(160);
     }
-    await chrome.action.setIcon({ path: GREEN_ICON });
+    await chrome.action.setIcon({ path: GREEN_ICONS });
     await sleep(900);
-    await chrome.action.setIcon({ path: DEFAULT_ICON });
+    await chrome.action.setIcon({ path: DEFAULT_ICONS });
 
     chrome.action.setBadgeText({ text: "" });
     chrome.action.setTitle({ title: "Velox" });
@@ -68,7 +66,7 @@ async function flashSuccess(): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
-    id: MENU_ID,
+    id: CONTEXT_MENU_ID,
     title: "Download with Velox",
     contexts: ["link"],
   });
@@ -78,7 +76,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => handshake());
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId !== MENU_ID || !info.linkUrl) return;
+  if (info.menuItemId !== CONTEXT_MENU_ID || !info.linkUrl) return;
   void submit(info.linkUrl, "context_menu", {
     pageUrl: info.pageUrl,
     referrer: tab?.url,
@@ -163,7 +161,7 @@ function friendlyMessage(code: string, detail: string | undefined, origin: strin
   }
 }
 
-async function waitForComplete(tabId: number, timeoutMs = 15000): Promise<void> {
+async function waitForComplete(tabId: number, timeoutMs = ASSIST_TAB_LOAD_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -283,8 +281,11 @@ setCancelBridge((downloadId) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg?.type) {
     case "velox:getStatus":
-      sendResponse(status());
-      break;
+      void refreshStatus().then(sendResponse);
+      return true;
+    case "velox:reconnect":
+      void reconnect().then(sendResponse);
+      return true;
     case "velox:submit":
       void submit(msg.url, msg.source ?? "popup", { pageUrl: msg.pageUrl }).then(sendResponse);
       return true;
@@ -326,7 +327,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         state.acks.delete(msg.seq);
         sendResponse({ cancelled: true });
         cleanupAssist(msg.transferId);
-      }, 60000);
+      }, CHUNK_ACK_TIMEOUT_MS);
       state.acks.set(msg.seq, (cancelled) => {
         clearTimeout(timer);
         sendResponse({ cancelled });

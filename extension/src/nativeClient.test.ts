@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REQUEST_TIMEOUT_MS } from "./constants";
 import * as client from "./nativeClient";
 
 type Listener = (arg: unknown) => void;
@@ -88,7 +89,7 @@ describe("nativeClient", () => {
     const p = client.submit("https://example.com/slow.zip", "popup");
     const posted = ctx.port.posted[0];
 
-    await vi.advanceTimersByTimeAsync(client.REQUEST_TIMEOUT_MS + 1);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
     await expect(p).resolves.toMatchObject({ ok: false, code: "TIMEOUT" });
 
     // A late download_accepted must be ignored, not throw or resolve anything.
@@ -135,5 +136,60 @@ describe("nativeClient", () => {
     });
 
     await expect(p).resolves.toMatchObject({ ok: false, code: "PROBE_FAILED" });
+  });
+
+  it("reports handshake failures instead of swallowing them", async () => {
+    const p = client.handshake();
+    ctx.chromeMock.runtime.lastError = {
+      message: "Specified native messaging host not found.",
+    };
+    ctx.port.disconnectListeners.forEach((fn) => fn(undefined));
+    await p;
+
+    expect(client.status()).toMatchObject({
+      connected: false,
+      errorCode: "HOST_NOT_FOUND",
+    });
+    expect(client.status().lastError).toMatch(/not installed|not registered/i);
+  });
+
+  it("marks connected after a successful handshake", async () => {
+    const p = client.handshake();
+    const hello = ctx.port.posted[0];
+    expect(hello.type).toBe("hello");
+    emitMessage({ version: 1, id: hello.id, type: "ready", payload: {} });
+    await p;
+
+    expect(client.status()).toMatchObject({
+      connected: true,
+      lastError: null,
+      errorCode: null,
+    });
+  });
+
+  it("refreshStatus handshakes before reporting status", async () => {
+    const p = client.refreshStatus();
+    const hello = ctx.port.posted[0];
+    emitMessage({ version: 1, id: hello.id, type: "ready", payload: {} });
+
+    await expect(p).resolves.toMatchObject({ connected: true, errorCode: null });
+  });
+
+  it("reconnect bypasses the cooldown after a failed attempt", async () => {
+    const first = client.handshake();
+    ctx.chromeMock.runtime.lastError = { message: "Native host has exited." };
+    ctx.port.disconnectListeners.forEach((fn) => fn(undefined));
+    await first;
+    expect(client.status()).toMatchObject({
+      connected: false,
+      errorCode: "APP_NOT_RUNNING",
+    });
+
+    const p = client.reconnect();
+    const hello = ctx.port.posted[ctx.port.posted.length - 1];
+    expect(hello.type).toBe("hello");
+    emitMessage({ version: 1, id: hello.id, type: "ready", payload: {} });
+
+    await expect(p).resolves.toMatchObject({ connected: true, errorCode: null });
   });
 });

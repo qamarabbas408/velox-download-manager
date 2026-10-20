@@ -1,4 +1,13 @@
-import { ErrorCode, MessageType, PROTOCOL_VERSION, VeloxError } from "./types";
+import { ErrorCode, MessageType, VeloxError } from "./types";
+import {
+  ASSIST_CHUNK_BYTES,
+  HANDSHAKE_TIMEOUT_MS,
+  MAX_UNACKED_BYTES,
+  NATIVE_HOST_NAME,
+  PROTOCOL_VERSION,
+  RECONNECT_COOLDOWN_MS,
+  REQUEST_TIMEOUT_MS,
+} from "./constants";
 import type {
   AssistRequestPayload,
   ChunkAckPayload,
@@ -10,8 +19,6 @@ import type {
   StatusResponse,
   SubmitResult,
 } from "./types";
-
-const HOST_NAME = "com.velox.native_host";
 
 /** Stable per-service-worker identity, reported to Velox in `hello`. */
 const CLIENT_ID = (() => {
@@ -38,14 +45,10 @@ function detectBrowser(): string {
 
 const BROWSER = detectBrowser();
 
-export const REQUEST_TIMEOUT_MS = 8000;
-export const HANDSHAKE_TIMEOUT_MS = 4000;
-/** After a disconnect, fail fast for a short window instead of reconnecting. */
-export const RECONNECT_COOLDOWN_MS = 3000;
-
 let port: chrome.runtime.Port | null = null;
 let connected = false;
 let lastError: string | null = null;
+let lastErrorCode: ErrorCode | null = null;
 let disconnectedAt = 0;
 let idSeq = 0;
 
@@ -59,6 +62,7 @@ interface Pending {
 interface SendOptions {
   timeoutMs?: number;
   expect?: string;
+  force?: boolean;
 }
 
 const pending = new Map<string, Pending>();
@@ -87,23 +91,26 @@ function rejectAllPending(err: VeloxError): void {
   pending.clear();
 }
 
-function classifyDisconnect(): VeloxError {
-  const raw = chrome.runtime.lastError?.message ?? "native host disconnected";
-  const notFound = /not found|not registered|cannot connect/i.test(raw);
+function classify(raw: string): VeloxError {
+  const notFound = /not found|not registered|not installed|cannot connect/i.test(raw);
   return new VeloxError(
     notFound ? ErrorCode.HOST_NOT_FOUND : ErrorCode.APP_NOT_RUNNING,
     notFound ? "Velox browser host is not installed or registered." : "Velox is not running."
   );
 }
 
-function ensurePort(): chrome.runtime.Port {
+function classifyDisconnect(): VeloxError {
+  return classify(chrome.runtime.lastError?.message ?? "native host disconnected");
+}
+
+function ensurePort(force = false): chrome.runtime.Port {
   if (port) return port;
 
-  if (disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS) {
+  if (!force && disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS) {
     throw new VeloxError(ErrorCode.APP_NOT_RUNNING, "Velox is not running.");
   }
 
-  const next = chrome.runtime.connectNative(HOST_NAME);
+  const next = chrome.runtime.connectNative(NATIVE_HOST_NAME);
 
   next.onMessage.addListener((raw: unknown) => {
     const msg = raw as Envelope;
@@ -157,17 +164,23 @@ function ensurePort(): chrome.runtime.Port {
     if (msg.type === MessageType.READY) {
       connected = true;
       lastError = null;
+      lastErrorCode = null;
     } else if (msg.type === MessageType.ERROR) {
-      lastError = ((msg.payload ?? {}) as ErrorPayload).message ?? "unknown error";
+      const payload = (msg.payload ?? {}) as ErrorPayload;
+      lastError = payload.message ?? "unknown error";
+      lastErrorCode = (payload.code as ErrorCode) || ErrorCode.INTERNAL;
     }
   });
 
   next.onDisconnect.addListener(() => {
+    // Ignore a stale port's disconnect after a reconnect replaced it.
+    if (port !== next) return;
     const err = classifyDisconnect();
     connected = false;
     lastError = err.message;
+    lastErrorCode = err.code;
     disconnectedAt = Date.now();
-    if (port === next) port = null;
+    port = null;
     rejectAllPending(err);
   });
 
@@ -178,14 +191,14 @@ function ensurePort(): chrome.runtime.Port {
 function sendRequest(
   type: string,
   payload: unknown,
-  { timeoutMs = REQUEST_TIMEOUT_MS, expect }: SendOptions = {}
+  { timeoutMs = REQUEST_TIMEOUT_MS, expect, force }: SendOptions = {}
 ): Promise<Envelope> {
   return new Promise((resolve, reject) => {
     let target: chrome.runtime.Port;
     try {
-      target = ensurePort();
+      target = ensurePort(force);
     } catch (e) {
-      reject(e instanceof VeloxError ? e : new VeloxError(ErrorCode.APP_NOT_RUNNING, String(e)));
+      reject(e instanceof VeloxError ? e : classify(e instanceof Error ? e.message : String(e)));
       return;
     }
 
@@ -207,17 +220,63 @@ function sendRequest(
   });
 }
 
-export function handshake(): void {
-  if (port || (disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS)) return;
+export function handshake(force = false): Promise<void> {
+  if (port || (!force && disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS)) {
+    return Promise.resolve();
+  }
   const hello: HelloPayload = {
     extVersion: chrome.runtime.getManifest().version,
     clientId: CLIENT_ID,
     browser: BROWSER,
   };
-  sendRequest(MessageType.HELLO, hello, {
+  return sendRequest(MessageType.HELLO, hello, {
     timeoutMs: HANDSHAKE_TIMEOUT_MS,
     expect: MessageType.READY,
-  }).catch(() => {});
+    force,
+  }).then(
+    () => {
+      connected = true;
+      lastError = null;
+      lastErrorCode = null;
+    },
+    (e) => {
+      // Surface handshake failures so the popup can offer a next step.
+      const err = e instanceof VeloxError ? e : new VeloxError(ErrorCode.INTERNAL, String(e));
+      connected = false;
+      lastError = err.message;
+      lastErrorCode = err.code;
+    }
+  );
+}
+
+/**
+ * Force a fresh connection attempt, bypassing the reconnect cooldown, and
+ * return the resulting status. Used by the popup's Reconnect action.
+ */
+export async function reconnect(): Promise<StatusResponse> {
+  disconnectedAt = 0;
+  if (port) {
+    try {
+      port.disconnect();
+    } catch {
+      // already closed
+    }
+    port = null;
+  }
+  connected = false;
+  await handshake(true);
+  return status();
+}
+
+/**
+ * Current status, first attempting a handshake when disconnected. Used when the
+ * popup opens so it can distinguish "app not installed" from "app closed".
+ */
+export async function refreshStatus(): Promise<StatusResponse> {
+  if (!connected) {
+    await handshake();
+  }
+  return status();
 }
 
 function isValidUrl(url: string): boolean {
@@ -246,16 +305,18 @@ export async function submit(
     const accepted = (res.payload ?? {}) as DownloadAcceptedPayload;
     connected = true;
     lastError = null;
+    lastErrorCode = null;
     return { ok: true, downloadId: accepted.downloadId };
   } catch (e) {
     const err = e instanceof VeloxError ? e : new VeloxError(ErrorCode.INTERNAL, String(e));
     lastError = err.message;
+    lastErrorCode = err.code;
     return { ok: false, code: err.code, error: err.message };
   }
 }
 
 export function status(): StatusResponse {
-  return { connected, lastError, clientId: CLIENT_ID };
+  return { connected, lastError, errorCode: lastErrorCode, clientId: CLIENT_ID };
 }
 
 /** Post an arbitrary protocol message to the app over the native port. */
@@ -285,9 +346,6 @@ export function setCancelBridge(fn: (downloadId: string) => void): void {
 }
 
 // --- Browser-assisted streaming (M3) -----------------------------------------
-
-const MAX_UNACKED_BYTES = 4 * 1024 * 1024;
-const ASSIST_CHUNK_BYTES = 1024 * 1024;
 
 interface Transfer {
   unacked: number;
@@ -443,6 +501,7 @@ export function __resetForTests(): void {
   port = null;
   connected = false;
   lastError = null;
+  lastErrorCode = null;
   disconnectedAt = 0;
   idSeq = 0;
 }

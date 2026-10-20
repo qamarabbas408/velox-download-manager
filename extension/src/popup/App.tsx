@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import type { StatusResponse } from "../types";
+import { SOURCEFORGE_URL } from "../constants";
+import { disconnectedAction } from "./disconnected";
 
 type Result = { kind: "ok" | "error"; text: string };
 
@@ -10,6 +12,7 @@ export default function App() {
   const [status, setStatus] = useState<StatusResponse>({
     connected: false,
     lastError: null,
+    errorCode: null,
     clientId: "",
   });
   const [assist, setAssist] = useState(true);
@@ -52,11 +55,27 @@ export default function App() {
     );
   };
 
+  const reconnect = () => {
+    if (busy) return;
+    setBusy(true);
+    setResult(null);
+    chrome.runtime.sendMessage(
+      { type: "velox:reconnect" },
+      (res?: StatusResponse) => {
+        setBusy(false);
+        if (res) setStatus(res);
+        else refresh();
+      }
+    );
+  };
+
   const toggleAssist = () => {
     const next = !assist;
     setAssist(next);
     chrome.storage.local.set({ assistEnabled: next });
   };
+
+  const action = disconnectedAction(status);
 
   return (
     <div className="popup">
@@ -71,39 +90,57 @@ export default function App() {
         </span>
       </header>
 
-      <div className="field">
-        <label className="field__label" htmlFor="velox-url">
-          Download URL
-        </label>
-        <input
-          id="velox-url"
-          className="field__input"
-          type="text"
-          placeholder="https://example.com/file.zip"
-          value={url}
-          onChange={(e) => {
-            setUrl(e.target.value);
-            if (result) setResult(null);
-          }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-        />
-      </div>
+      {status.connected ? (
+        <>
+          <div className="field">
+            <label className="field__label" htmlFor="velox-url">
+              Download URL
+            </label>
+            <input
+              id="velox-url"
+              className="field__input"
+              type="text"
+              placeholder="https://example.com/file.zip"
+              value={url}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (result) setResult(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && submit()}
+            />
+          </div>
 
-      <button className="btn" onClick={submit} disabled={busy || !url.trim()}>
-        {busy ? "Sending…" : "Send to Velox"}
-      </button>
+          <button className="btn" onClick={submit} disabled={busy || !url.trim()}>
+            {busy ? "Sending…" : "Send to Velox"}
+          </button>
 
-      {result && (
-        <div className={`banner banner--${result.kind}`} role="status">
-          <span className="banner__dot" />
-          <span className="banner__text">{result.text}</span>
+          {result && (
+            <div className={`banner banner--${result.kind}`} role="status">
+              <span className="banner__dot" />
+              <span className="banner__text">{result.text}</span>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="disconnected" role="status">
+          <p className="hint">
+            {status.lastError ?? "Start Velox to receive downloads."}
+          </p>
+          {action === "install" ? (
+            <a
+              className="btn btn--link"
+              href={SOURCEFORGE_URL}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Install Velox
+            </a>
+          ) : (
+            <button className="btn" onClick={reconnect} disabled={busy}>
+              {busy ? "Reconnecting…" : "Reconnect"}
+            </button>
+          )}
         </div>
-      )}
-
-      {!status.connected && (
-        <p className="hint">
-          {status.lastError ?? "Start Velox to receive downloads."}
-        </p>
       )}
 
       <label className="toggle">

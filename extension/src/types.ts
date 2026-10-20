@@ -1,5 +1,3 @@
-export const PROTOCOL_VERSION = 1;
-
 export interface Envelope<T = unknown> {
   version: number;
   id: string;
@@ -39,10 +37,6 @@ export const ErrorCode = {
   ASSIST_FETCH_FAILED: "ASSIST_FETCH_FAILED",
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
-
-/** Browser-assisted transfer tuning (bytes). */
-export const CHUNK_SIZE_BYTES = 1024 * 1024;
-export const MAX_UNACKED_BYTES = 4 * 1024 * 1024;
 
 export interface HelloPayload {
   extVersion: string;
@@ -129,6 +123,7 @@ export interface ErrorPayload {
 export interface StatusResponse {
   connected: boolean;
   lastError: string | null;
+  errorCode: ErrorCode | null;
   clientId: string;
 }
 
