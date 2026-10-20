@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "0.6.1"
+version = "0.6.2"
 description = "Velox — a fast, segmented download manager for Mac & Windows"
 authors = ["Qamar Abbas (TheDigiOrb)"]
 edition = "2021"

@@ -167,3 +167,8 @@ export function onDownloadProgress(
     cb(event.payload)
   );
 }
+
+/** Fires when the set of connected browser-extension clients changes. */
+export function onBrowserStatusChanged(cb: () => void): Promise<() => void> {
+  return listen("browser://status-changed", () => cb());
+}

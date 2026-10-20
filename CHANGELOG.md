@@ -2,6 +2,16 @@
 
 All notable changes to Velox are documented in this file.
 
+## [0.6.2] — 2026-10-20
+
+### Fixed
+- Browser assistance is now offered reliably. The app registers a browser
+  connection even when an older extension submits a download without
+  identifying itself, records that connection as the download's origin, and
+  updates the UI live when a browser connects.
+- "Retry with Browser" falls back to any connected browser, so it also works
+  for downloads added inside the app.
+
 ## [0.6.1] — 2026-10-14
 
 ### Fixed

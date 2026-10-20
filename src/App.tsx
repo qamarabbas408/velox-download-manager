@@ -24,6 +24,7 @@ import {
   assistDownload,
   isTauri,
   listDownloads,
+  onBrowserStatusChanged,
   onDownloadProgress,
   pauseDownload,
   removeDownload,
@@ -129,6 +130,17 @@ export default function App() {
   useEffect(() => {
     if (detailId) refreshBrowser();
   }, [detailId, refreshBrowser]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    onBrowserStatusChanged(refreshBrowser)
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [refreshBrowser]);
 
   useEffect(() => {
     if (!isTauri) return;

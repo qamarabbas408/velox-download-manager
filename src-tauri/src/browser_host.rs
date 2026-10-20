@@ -17,7 +17,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, Mutex};
 
@@ -93,6 +93,16 @@ impl BrowserClients {
     pub async fn browser_of(&self, client_id: &str) -> Option<String> {
         self.0.lock().await.get(client_id).map(|e| e.browser.clone())
     }
+
+    /// Whether a client id is currently registered.
+    pub async fn contains(&self, client_id: &str) -> bool {
+        self.0.lock().await.contains_key(client_id)
+    }
+
+    /// Any connected client id, used as a routing fallback.
+    pub async fn first_id(&self) -> Option<String> {
+        self.0.lock().await.keys().next().cloned()
+    }
 }
 
 /// Start the IPC host on a background runtime task.
@@ -115,6 +125,11 @@ fn new_id(prefix: &str) -> String {
 
 fn new_download_id() -> String {
     new_id("br")
+}
+
+/// Tell the UI that the set of connected browser clients changed.
+fn notify_browser_status(app: &AppHandle) {
+    let _ = app.emit("browser://status-changed", ());
 }
 
 async fn reply(
@@ -193,6 +208,7 @@ where
     // Cleanup: drop the registry entry; the writer task ends when tx drops.
     if let Some(id) = client_id {
         clients.unregister(&id, &tx).await;
+        notify_browser_status(&app);
     }
     drop(tx);
     let _ = writer_task.await;
@@ -214,10 +230,16 @@ async fn handle_message(
                     return;
                 }
             };
+            // A connection may have been auto-registered when it submitted a
+            // download before saying hello; drop that provisional entry.
+            if let Some(old) = client_id.take() {
+                clients.unregister(&old, tx).await;
+            }
             *client_id = Some(hello.client_id.clone());
             clients
                 .register(hello.client_id.clone(), tx.clone(), hello.browser.clone())
                 .await;
+            notify_browser_status(app);
 
             let _ = reply(
                 tx,
@@ -259,6 +281,16 @@ async fn handle_message(
             .await;
         }
         kind::DOWNLOAD_REQUEST => {
+            // Older extensions send downloads without a `hello`; register the
+            // connection so the UI shows browser assistance and can route it.
+            if client_id.is_none() {
+                let synthetic = new_id("client");
+                *client_id = Some(synthetic.clone());
+                clients
+                    .register(synthetic, tx.clone(), "Browser".to_string())
+                    .await;
+                notify_browser_status(app);
+            }
             // Heavy: probe + start. Handle off the reader loop so the
             // connection stays responsive (needed for streaming later).
             let app = app.clone();
@@ -421,11 +453,17 @@ pub async fn assist_download(
         return Err("This download isn't eligible for browser assistance.".to_string());
     }
 
-    let client_id = origin.ok_or_else(|| {
-        "This download wasn't started from the browser. Open your browser with the Velox extension connected, then retry.".to_string()
-    })?;
-
+    // Prefer the browser that submitted the download; fall back to any
+    // connected browser (e.g. the download was added inside the app, or the
+    // original connection has since closed).
     let clients = clients.inner().clone();
+    let client_id = match origin {
+        Some(id) if clients.contains(&id).await => id,
+        _ => clients.first_id().await.ok_or_else(|| {
+            "Open your browser with the Velox extension connected, then retry.".to_string()
+        })?,
+    };
+
     let payload = AssistRequestPayload {
         download_id: id,
         url,
@@ -521,5 +559,44 @@ async fn serve(app: AppHandle, clients: Arc<BrowserClients>) -> std::io::Result<
         server.connect().await?;
         // Handle sequentially: a single extension port is expected for v1.
         handle_conn(app.clone(), clients.clone(), server).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel() -> (Tx, mpsc::Receiver<Envelope>) {
+        mpsc::channel(1)
+    }
+
+    #[tokio::test]
+    async fn registry_tracks_connected_clients() {
+        let clients = BrowserClients::new();
+        assert!(!clients.contains("a").await);
+        assert!(clients.first_id().await.is_none());
+
+        let (tx, _rx) = channel();
+        clients.register("a".to_string(), tx, "Chrome".to_string()).await;
+        assert!(clients.contains("a").await);
+        assert_eq!(clients.first_id().await.as_deref(), Some("a"));
+        assert_eq!(clients.browser_of("a").await.as_deref(), Some("Chrome"));
+    }
+
+    #[tokio::test]
+    async fn unregister_only_removes_the_same_connection() {
+        let clients = BrowserClients::new();
+        let (tx_a, _rx_a) = channel();
+        clients.register("a".to_string(), tx_a, "Chrome".to_string()).await;
+
+        let (tx_other, _rx_other) = channel();
+        clients.unregister("a", &tx_other).await;
+        assert!(clients.contains("a").await);
+
+        let (tx_a2, _rx_a2) = channel();
+        clients.register("a".to_string(), tx_a2.clone(), "Chrome".to_string()).await;
+        clients.unregister("a", &tx_a2).await;
+        assert!(!clients.contains("a").await);
+        assert!(clients.first_id().await.is_none());
     }
 }
