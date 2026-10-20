@@ -15,7 +15,7 @@ pub const HOST_NAME: &str = "com.velox.native_host";
 ///   store strips `key`), add it here once known.
 const ALLOWED_EXTENSION_IDS: &[&str] = &[
     "ljgacipalnmcfpnaadgbhmampghkachi", // dev (pinned key)
-    // "STORE_ID_HERE",                  // store-assigned id, fill after upload
+    "fghoiobfogfmjnhklgpbagdgknldfmll", // Chrome Web Store
 ];
 
 fn shim_path() -> Option<PathBuf> {

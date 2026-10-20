@@ -2,6 +2,14 @@
 
 All notable changes to Velox are documented in this file.
 
+## [0.6.1] — 2026-10-14
+
+### Fixed
+- Allow the published Chrome Web Store extension
+  (`fghoiobfogfmjnhklgpbagdgknldfmll`) to connect to the native host. The 0.6.0
+  build only trusted the development extension id, so the store version could
+  not connect.
+
 ## [0.6.0] — 2026-10-14
 
 ### Added
