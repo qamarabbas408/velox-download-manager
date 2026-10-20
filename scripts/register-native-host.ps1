@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$StoreId = "fghoiobfogfmjnhklgpbagdgknldfmll"
 
 $HostName = "com.velox.native_host"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -26,12 +27,15 @@ $ManifestDir = Join-Path $env:LOCALAPPDATA "Velox"
 New-Item -ItemType Directory -Force -Path $ManifestDir | Out-Null
 $ManifestPath = Join-Path $ManifestDir "native-host.json"
 
+$Origins = @("chrome-extension://$ExtensionId/")
+if ($ExtensionId -ne $StoreId) { $Origins += "chrome-extension://$StoreId/" }
+
 $manifest = @{
   name            = $HostName
   description     = "Velox browser integration"
   path            = $Bin
   type            = "stdio"
-  allowed_origins = @("chrome-extension://$ExtensionId/")
+  allowed_origins = $Origins
 }
 $manifest | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $ManifestPath
 Write-Host "manifest: $ManifestPath"

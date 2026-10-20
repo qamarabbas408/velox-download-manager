@@ -10,6 +10,7 @@
 set -euo pipefail
 
 EXT_ID="${1:-ljgacipalnmcfpnaadgbhmampghkachi}"
+STORE_ID="fghoiobfogfmjnhklgpbagdgknldfmll"
 PROFILE="${2:-debug}"
 HOST_NAME="com.velox.native_host"
 
@@ -22,6 +23,13 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+if [[ "$EXT_ID" == "$STORE_ID" ]]; then
+  ORIGINS="\"chrome-extension://$EXT_ID/\""
+else
+  ORIGINS="\"chrome-extension://$EXT_ID/\",
+    \"chrome-extension://$STORE_ID/\""
+fi
+
 MANIFEST=$(cat <<JSON
 {
   "name": "$HOST_NAME",
@@ -29,7 +37,7 @@ MANIFEST=$(cat <<JSON
   "path": "$BIN",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://$EXT_ID/"
+    $ORIGINS
   ]
 }
 JSON
