@@ -47,6 +47,9 @@ const BROWSER = detectBrowser();
 
 let port: chrome.runtime.Port | null = null;
 let connected = false;
+/** True only after the app has acknowledged our `hello` on the current port. */
+let handshaken = false;
+let handshaking: Promise<void> | null = null;
 let lastError: string | null = null;
 let lastErrorCode: ErrorCode | null = null;
 let disconnectedAt = 0;
@@ -110,6 +113,7 @@ function ensurePort(force = false): chrome.runtime.Port {
     throw new VeloxError(ErrorCode.APP_NOT_RUNNING, "Velox is not running.");
   }
 
+  handshaken = false;
   const next = chrome.runtime.connectNative(NATIVE_HOST_NAME);
 
   next.onMessage.addListener((raw: unknown) => {
@@ -177,6 +181,7 @@ function ensurePort(force = false): chrome.runtime.Port {
     if (port !== next) return;
     const err = classifyDisconnect();
     connected = false;
+    handshaken = false;
     lastError = err.message;
     lastErrorCode = err.code;
     disconnectedAt = Date.now();
@@ -221,7 +226,9 @@ function sendRequest(
 }
 
 export function handshake(force = false): Promise<void> {
-  if (port || (!force && disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS)) {
+  if (handshaken) return Promise.resolve();
+  if (handshaking) return handshaking;
+  if (!force && disconnectedAt && Date.now() - disconnectedAt < RECONNECT_COOLDOWN_MS) {
     return Promise.resolve();
   }
   const hello: HelloPayload = {
@@ -229,24 +236,32 @@ export function handshake(force = false): Promise<void> {
     clientId: CLIENT_ID,
     browser: BROWSER,
   };
-  return sendRequest(MessageType.HELLO, hello, {
+  const p = sendRequest(MessageType.HELLO, hello, {
     timeoutMs: HANDSHAKE_TIMEOUT_MS,
     expect: MessageType.READY,
     force,
-  }).then(
-    () => {
-      connected = true;
-      lastError = null;
-      lastErrorCode = null;
-    },
-    (e) => {
-      // Surface handshake failures so the popup can offer a next step.
-      const err = e instanceof VeloxError ? e : new VeloxError(ErrorCode.INTERNAL, String(e));
-      connected = false;
-      lastError = err.message;
-      lastErrorCode = err.code;
-    }
-  );
+  })
+    .then(
+      () => {
+        handshaken = true;
+        connected = true;
+        lastError = null;
+        lastErrorCode = null;
+      },
+      (e) => {
+        // Surface handshake failures so the popup can offer a next step.
+        const err = e instanceof VeloxError ? e : new VeloxError(ErrorCode.INTERNAL, String(e));
+        handshaken = false;
+        connected = false;
+        lastError = err.message;
+        lastErrorCode = err.code;
+      }
+    )
+    .finally(() => {
+      handshaking = null;
+    });
+  handshaking = p;
+  return p;
 }
 
 /**
@@ -255,6 +270,8 @@ export function handshake(force = false): Promise<void> {
  */
 export async function reconnect(): Promise<StatusResponse> {
   disconnectedAt = 0;
+  handshaken = false;
+  handshaking = null;
   if (port) {
     try {
       port.disconnect();
@@ -273,7 +290,7 @@ export async function reconnect(): Promise<StatusResponse> {
  * popup opens so it can distinguish "app not installed" from "app closed".
  */
 export async function refreshStatus(): Promise<StatusResponse> {
-  if (!connected) {
+  if (!handshaken) {
     await handshake();
   }
   return status();
@@ -298,6 +315,10 @@ export async function submit(
   }
 
   try {
+    // Identify this connection before the download so the app can register the
+    // browser and route browser assistance back to it. Hello is posted first and
+    // the native channel preserves order, so no round-trip is needed here.
+    if (!handshaken) void handshake();
     const payload: DownloadRequestPayload = { url, source, ...context };
     const res = await sendRequest(MessageType.DOWNLOAD_REQUEST, payload, {
       expect: MessageType.DOWNLOAD_ACCEPTED,
@@ -500,6 +521,8 @@ export function __resetForTests(): void {
   pending.clear();
   port = null;
   connected = false;
+  handshaken = false;
+  handshaking = null;
   lastError = null;
   lastErrorCode = null;
   disconnectedAt = 0;

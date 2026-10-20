@@ -51,6 +51,18 @@ function emitMessage(msg: Msg): void {
   ctx.port.messageListeners.forEach((fn) => fn(msg));
 }
 
+function messagesOfType(type: string): Msg[] {
+  return ctx.port.posted.filter((m) => m.type === type);
+}
+
+function readyFor(id: string): Msg {
+  return { version: 1, id, type: "ready", payload: {} };
+}
+
+function acceptedFor(id: string): Msg {
+  return { version: 1, id, type: "download_accepted", payload: { downloadId: "d" } };
+}
+
 beforeEach(() => {
   client.__resetForTests();
   ctx = makeContext();
@@ -67,18 +79,16 @@ describe("nativeClient", () => {
     const p1 = client.submit("https://example.com/a.zip", "popup");
     const p2 = client.submit("https://example.com/b.zip", "popup");
 
-    const ids = ctx.port.posted.map((m) => m.id);
-    expect(ids).toHaveLength(2);
+    // Both submits share a single hello.
+    expect(messagesOfType("hello")).toHaveLength(1);
+    emitMessage(readyFor(messagesOfType("hello")[0].id));
+
+    const downloads = messagesOfType("download_request");
+    expect(downloads).toHaveLength(2);
+    const ids = downloads.map((m) => m.id);
     expect(new Set(ids).size).toBe(2);
 
-    for (const m of ctx.port.posted) {
-      emitMessage({
-        version: 1,
-        id: m.id,
-        type: "download_accepted",
-        payload: { downloadId: "d" },
-      });
-    }
+    for (const m of downloads) emitMessage(acceptedFor(m.id));
 
     await expect(p1).resolves.toMatchObject({ ok: true });
     await expect(p2).resolves.toMatchObject({ ok: true });
@@ -87,20 +97,14 @@ describe("nativeClient", () => {
   it("ignores a response that arrives after a timeout", async () => {
     vi.useFakeTimers();
     const p = client.submit("https://example.com/slow.zip", "popup");
-    const posted = ctx.port.posted[0];
+    emitMessage(readyFor(messagesOfType("hello")[0].id));
+    const posted = messagesOfType("download_request")[0];
 
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
     await expect(p).resolves.toMatchObject({ ok: false, code: "TIMEOUT" });
 
     // A late download_accepted must be ignored, not throw or resolve anything.
-    expect(() =>
-      emitMessage({
-        version: 1,
-        id: posted.id,
-        type: "download_accepted",
-        payload: { downloadId: "late" },
-      })
-    ).not.toThrow();
+    expect(() => emitMessage(acceptedFor(posted.id))).not.toThrow();
   });
 
   it("fails pending requests when the host disconnects", async () => {
@@ -119,7 +123,8 @@ describe("nativeClient", () => {
 
   it("rejects unexpected response types", async () => {
     const p = client.submit("https://example.com/a.zip", "popup");
-    const posted = ctx.port.posted[0];
+    emitMessage(readyFor(messagesOfType("hello")[0].id));
+    const posted = messagesOfType("download_request")[0];
     emitMessage({ version: 1, id: posted.id, type: "ready", payload: {} });
 
     await expect(p).resolves.toMatchObject({ ok: false, code: "INTERNAL" });
@@ -127,7 +132,8 @@ describe("nativeClient", () => {
 
   it("surfaces the server's structured error code", async () => {
     const p = client.submit("https://example.com/a.zip", "popup");
-    const posted = ctx.port.posted[0];
+    emitMessage(readyFor(messagesOfType("hello")[0].id));
+    const posted = messagesOfType("download_request")[0];
     emitMessage({
       version: 1,
       id: posted.id,
@@ -191,5 +197,32 @@ describe("nativeClient", () => {
     emitMessage({ version: 1, id: hello.id, type: "ready", payload: {} });
 
     await expect(p).resolves.toMatchObject({ connected: true, errorCode: null });
+  });
+
+  it("sends hello before the download request", async () => {
+    const p = client.submit("https://example.com/a.zip", "popup");
+
+    expect(ctx.port.posted.map((m) => m.type)).toEqual([
+      "hello",
+      "download_request",
+    ]);
+
+    emitMessage(readyFor(ctx.port.posted[0].id));
+    emitMessage(acceptedFor(ctx.port.posted[1].id));
+
+    await expect(p).resolves.toMatchObject({ ok: true });
+  });
+
+  it("handshakes only once per connection", async () => {
+    const p1 = client.submit("https://example.com/a.zip", "popup");
+    emitMessage(readyFor(messagesOfType("hello")[0].id));
+    emitMessage(acceptedFor(messagesOfType("download_request")[0].id));
+    await p1;
+
+    const p2 = client.submit("https://example.com/b.zip", "popup");
+    expect(messagesOfType("hello")).toHaveLength(1);
+    emitMessage(acceptedFor(messagesOfType("download_request")[1].id));
+
+    await expect(p2).resolves.toMatchObject({ ok: true });
   });
 });

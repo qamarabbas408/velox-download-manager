@@ -99,7 +99,7 @@ describe("background", () => {
       { url: "https://example.com" }
     );
 
-    expect(port.posted[0].type).toBe("download_request");
+    expect(port.posted.some((m) => m.type === "download_request")).toBe(true);
 
     chromeMock.runtime.lastError = { message: "Native host has exited." };
     port.disconnectListeners.forEach((fn) => fn(undefined));
