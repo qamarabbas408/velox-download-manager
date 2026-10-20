@@ -42,6 +42,17 @@ scripts/publish-sourceforge.sh --readme-only
 
 The script creates the version folder if needed, refuses to replace installers, keeps an existing `README.md`, and verifies each upload by downloading a temporary copy and comparing its contents with the local file. If a selected Mac DMG is missing or ambiguous, build the current app version first. If an installer is already in that remote folder, the script stops rather than overwriting it.
 
+## Publish release notes (README)
+
+`publish-readme.sh` uploads the current version's `CHANGELOG.md` section as `README.md` to the matching SourceForge release folder. Use it when you upload the installers yourself.
+
+```sh
+scripts/publish-readme.sh          # create/update the release notes
+scripts/publish-readme.sh --force  # replace an existing README.md
+```
+
+It creates the version folder if needed, refuses to replace an existing `README.md` unless `--force` is passed, and verifies the upload by downloading a temporary copy and comparing the bytes.
+
 ## Build and package the browser extension
 
 `package-extension.sh` builds the browser extension and creates a store upload ZIP at the repository root. The ZIP filename includes the extension version.
