@@ -32,7 +32,7 @@ The download is fine — this is Gatekeeper. Allow the first launch with one of:
 - Or run this once in Terminal, then open the app:
 
   ```sh
-  xattr -dr com.apple.quarantine /Applications/Velox.app
+  sudo xattr -dr com.apple.quarantine /Applications/Velox.app
   ```
 
 This extra step will be removed once Velox is signed and notarized by Apple.

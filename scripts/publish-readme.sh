@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Publish the current version's CHANGELOG section as README.md to the matching
+# Publish a version's CHANGELOG section as README.md to the matching
 # SourceForge release folder (used as the release notes). Installers are
 # uploaded separately.
 #
 # Usage:
-#   scripts/publish-readme.sh [--force]
+#   scripts/publish-readme.sh [--version X.Y.Z] [--force]
 #
-# Uses the app version from package.json to choose the folder, e.g. 0.6.1 is
-# published under v6.1. Requires SSH key authentication for the SourceForge
-# account; passwords are disabled.
+# Defaults to the app version in package.json. Version 0.6.1 maps to v6.1.
+# Requires SSH key authentication for the SourceForge account; passwords are
+# disabled.
 set -euo pipefail
 
 readonly SF_USER="qmarabbas"
@@ -16,26 +16,41 @@ readonly SF_HOST="frs.sourceforge.net"
 readonly SF_PROJECT="velox-download-manager"
 readonly SF_ROOT="/home/frs/project/${SF_PROJECT}"
 readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly VERSION="$(node -p "require('${ROOT_DIR}/package.json').version")"
-readonly VERSION_DIR="$(node -e '
+
+usage() {
+  echo "Usage: $0 [--version X.Y.Z] [--force]" >&2
+  exit 2
+}
+
+FORCE=false
+TARGET_VERSION=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      shift
+      ;;
+    --version)
+      [[ $# -ge 2 ]] || usage
+      TARGET_VERSION="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--version X.Y.Z] [--force]"
+      exit 0
+      ;;
+    *) usage ;;
+  esac
+done
+
+VERSION="${TARGET_VERSION:-$(node -p "require('${ROOT_DIR}/package.json').version")}"
+VERSION_DIR="$(node -e '
 const [major = "0", minor = "0", patch = "0"] = process.argv[1].split(".");
 if (![major, minor, patch].every((part) => /^\d+$/.test(part))) process.exit(2);
 process.stdout.write(`v${major === "0" ? minor : major}${patch === "0" ? "" : `.${patch}`}`);
 ' "${VERSION}")"
-readonly REMOTE_DIR="${SF_ROOT}/${VERSION_DIR}"
-readonly SF_URL="https://sourceforge.net/projects/${SF_PROJECT}/files/${VERSION_DIR}/"
-
-FORCE=false
-if [[ $# -gt 0 ]]; then
-  case "$1" in
-    --force) FORCE=true ;;
-    -h|--help)
-      echo "Usage: $0 [--force]"
-      exit 0
-      ;;
-    *) echo "Usage: $0 [--force]" >&2; exit 2 ;;
-  esac
-fi
+REMOTE_DIR="${SF_ROOT}/${VERSION_DIR}"
+SF_URL="https://sourceforge.net/projects/${SF_PROJECT}/files/${VERSION_DIR}/"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -65,7 +80,7 @@ is fine — this is Gatekeeper. To open it the first time:
 2. Run this once in Terminal:
 
    ```sh
-   xattr -dr com.apple.quarantine /Applications/Velox.app
+   sudo xattr -dr com.apple.quarantine /Applications/Velox.app
    ```
 
 3. Open Velox normally. (Right-click → Open may also work.)

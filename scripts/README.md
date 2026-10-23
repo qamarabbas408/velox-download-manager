@@ -47,8 +47,9 @@ The script creates the version folder if needed, refuses to replace installers, 
 `publish-readme.sh` uploads the current version's `CHANGELOG.md` section as `README.md` to the matching SourceForge release folder. Use it when you upload the installers yourself.
 
 ```sh
-scripts/publish-readme.sh          # create/update the release notes
-scripts/publish-readme.sh --force  # replace an existing README.md
+scripts/publish-readme.sh                     # current package.json version
+scripts/publish-readme.sh --version 0.6.1     # a specific version
+scripts/publish-readme.sh --force             # replace an existing README.md
 ```
 
 It creates the version folder if needed, refuses to replace an existing `README.md` unless `--force` is passed, and verifies the upload by downloading a temporary copy and comparing the bytes.
