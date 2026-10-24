@@ -1,4 +1,5 @@
 mod browser_host;
+mod disk;
 mod download;
 mod history;
 mod native_host;

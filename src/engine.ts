@@ -12,6 +12,7 @@ export interface StartRequest {
   name: string;
   extension: string;
   sizeBytes: number;
+  sizeKnown: boolean;
   downloadDir: string;
   rangeSupported: boolean;
   segments: number;
@@ -171,4 +172,22 @@ export function onDownloadProgress(
 /** Fires when the set of connected browser-extension clients changes. */
 export function onBrowserStatusChanged(cb: () => void): Promise<() => void> {
   return listen("browser://status-changed", () => cb());
+}
+
+/** A structured rejection for a download submitted by the browser extension. */
+export interface StartErrorEvent {
+  code: string;
+  message: string;
+  expectedBytes?: number;
+  availableBytes?: number;
+  shortfallBytes?: number;
+  path?: string;
+}
+
+export function onBrowserStartError(
+  cb: (event: StartErrorEvent) => void
+): Promise<() => void> {
+  return listen<StartErrorEvent>("browser://start-error", (event) =>
+    cb(event.payload)
+  );
 }

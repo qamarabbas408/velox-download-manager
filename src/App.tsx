@@ -24,6 +24,7 @@ import {
   assistDownload,
   isTauri,
   listDownloads,
+  onBrowserStartError,
   onBrowserStatusChanged,
   onDownloadProgress,
   pauseDownload,
@@ -60,7 +61,13 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; names: string[] } | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ id: string; label: string; title?: string; action?: "view" } | null>(null);
+  const [toast, setToast] = useState<{
+    id: string;
+    label: string;
+    title?: string;
+    action?: "view" | "settings";
+    tone?: "info" | "error";
+  } | null>(null);
   const [inProgressUnseen, setInProgressUnseen] = useState(false);
   const [browserConnected, setBrowserConnected] = useState(false);
   const downloadDirRef = useRef(settings.downloadDir);
@@ -141,6 +148,32 @@ export default function App() {
       .catch(() => {});
     return () => unlisten?.();
   }, [refreshBrowser]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    onBrowserStartError((e) => {
+      const isSpace =
+        e.code === "INSUFFICIENT_SPACE" || e.code === "SPACE_UNAVAILABLE";
+      setToast({
+        id: `start-error-${e.code}`,
+        title:
+          e.code === "INSUFFICIENT_SPACE"
+            ? "Not enough disk space"
+            : e.code === "SPACE_UNAVAILABLE"
+              ? "Couldn't check free space"
+              : "Download rejected",
+        label: e.message,
+        action: isSpace ? "settings" : undefined,
+        tone: "error",
+      });
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -652,7 +685,11 @@ export default function App() {
       {toast && (
         <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-fade-in">
           <div className="flex items-start gap-3 bg-raised border border-line rounded-xl px-4 py-3 shadow-2xl max-w-md">
-            <span className="w-2 h-2 mt-1.5 rounded-full bg-signal shrink-0" />
+            <span
+              className={`w-2 h-2 mt-1.5 rounded-full shrink-0 ${
+                toast.tone === "error" ? "bg-danger" : "bg-signal"
+              }`}
+            />
             <div className="min-w-0">
               <p className="text-sm text-ink font-medium">{toast.title ?? "New download started"}</p>
               <p className="text-xs text-dim break-words">{toast.label}</p>
@@ -663,6 +700,18 @@ export default function App() {
                 className="flex items-center gap-1 text-signal text-sm font-medium hover:underline shrink-0"
               >
                 View
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {toast.action === "settings" && (
+              <button
+                onClick={() => {
+                  setIsSettingsOpen(true);
+                  setToast(null);
+                }}
+                className="flex items-center gap-1 text-signal text-sm font-medium hover:underline shrink-0"
+              >
+                Settings
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             )}

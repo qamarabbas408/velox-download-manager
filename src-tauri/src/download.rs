@@ -14,6 +14,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::disk;
 use crate::history;
 use crate::persist;
 
@@ -21,6 +22,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_SEGMENT_RETRIES: u32 = 12;
 const RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// How often to re-check destination free space during a transfer.
+const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Maximum time to wait for a chunk before considering the connection stalled.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,14 +39,19 @@ struct SegmentError {
     /// True when the failure looks like one browser assistance could solve
     /// (auth/forbidden/rate-limit responses).
     assist: bool,
+    /// True when the destination ran out of space; never retried.
+    disk_full: bool,
 }
 
 impl SegmentError {
     fn permanent(msg: String) -> Self {
-        Self { message: msg, retriable: false, assist: false }
+        Self { message: msg, retriable: false, assist: false, disk_full: false }
     }
     fn transient(msg: String) -> Self {
-        Self { message: msg, retriable: true, assist: false }
+        Self { message: msg, retriable: true, assist: false, disk_full: false }
+    }
+    fn disk_full(msg: String) -> Self {
+        Self { message: msg, retriable: false, assist: false, disk_full: true }
     }
 }
 
@@ -64,6 +72,8 @@ pub struct ProbeResult {
     pub name: String,
     pub extension: String,
     pub size_bytes: u64,
+    /// False when the server did not report a reliable total size.
+    pub size_known: bool,
     pub range_supported: bool,
     pub content_type: String,
 }
@@ -76,6 +86,8 @@ pub struct StartRequest {
     pub name: String,
     pub extension: String,
     pub size_bytes: u64,
+    /// False when the size is unknown; enables space preflight only when known.
+    pub size_known: bool,
     pub download_dir: String,
     pub range_supported: bool,
     pub segments: usize,
@@ -138,6 +150,8 @@ pub struct ActiveDownload {
     pub url: String,
     pub file_path: PathBuf,
     pub total_size: u64,
+    /// True when `total_size` came from reliable metadata (not unknown/zero).
+    pub size_known: bool,
     pub range_supported: bool,
     pub segment_count: usize,
     pub status: Mutex<DownloadStatus>,
@@ -437,6 +451,7 @@ pub async fn probe_impl(client: &reqwest::Client, url: &str) -> Result<ProbeResu
         url: url.to_string(),
         name,
         extension,
+        size_known: size.is_some(),
         size_bytes: size.unwrap_or(0),
         range_supported: range_supported && size.is_some(),
         content_type: content_type
@@ -504,6 +519,83 @@ async fn aggregate(dl: &ActiveDownload) -> (u64, bool) {
     // This also handles unbounded (unknown-length) segments whose `end` is 0.
     let done = !segs.is_empty() && segs.iter().all(|s| s.state == "done");
     (downloaded, done)
+}
+
+/// Remaining bytes expected from downloads that will keep consuming space.
+/// Paused downloads are excluded; they are revalidated when resumed.
+async fn active_expected_bytes(manager: &DownloadManager, exclude_id: Option<&str>) -> u64 {
+    let active: Vec<Arc<ActiveDownload>> = {
+        let downloads = manager.downloads.lock().await;
+        downloads
+            .iter()
+            .filter(|(id, _)| exclude_id != Some(id.as_str()))
+            .map(|(_, dl)| dl.clone())
+            .collect()
+    };
+
+    let mut total = 0u64;
+    for dl in active {
+        if matches!(
+            *dl.status.lock().await,
+            DownloadStatus::Downloading | DownloadStatus::Queued
+        ) {
+            let native = aggregate(&dl).await.0;
+            let downloaded = native.max(dl.external_bytes.load(Ordering::Relaxed));
+            total = total.saturating_add(dl.total_size.saturating_sub(downloaded));
+        }
+    }
+    total
+}
+
+/// Reject a known-size download when the destination volume cannot hold the
+/// file plus the safety reserve and space already promised to active downloads.
+fn check_known_size_space(
+    dir: &Path,
+    expected: u64,
+    active_expected: u64,
+) -> Result<(), StartError> {
+    let required = disk::required_bytes(expected, active_expected);
+    match disk::available_space(dir) {
+        Ok(available) if disk::fits(available, required) => Ok(()),
+        Ok(available) => Err(StartError::InsufficientSpace {
+            expected,
+            available,
+            shortfall: disk::shortfall(available, required),
+            path: dir.display().to_string(),
+        }),
+        Err(e) => Err(StartError::SpaceUnavailable {
+            path: dir.display().to_string(),
+            detail: e.to_string(),
+        }),
+    }
+}
+
+/// Persist resume state only when the existing model can safely resume.
+async fn persist_if_resumable(resume_dir: &Path, dl: &ActiveDownload) {
+    if dl.size_known && dl.total_size > 0 && dl.range_supported {
+        persist_state_quiet(resume_dir, dl).await;
+    } else {
+        persist::delete_state(&persist::state_path(resume_dir, &dl.id)).await;
+    }
+}
+
+/// Stop a download after a disk-space failure without ever marking it complete.
+async fn fail_disk_space(
+    app: Option<&AppHandle>,
+    dl: &ActiveDownload,
+    resume_dir: &Path,
+    hist: Option<&history::HistoryPool>,
+    message: String,
+) {
+    let downloaded = aggregate(dl).await.0;
+    *dl.last_error.lock().await = Some(message);
+    *dl.status.lock().await = DownloadStatus::Error;
+    persist_if_resumable(resume_dir, dl).await;
+    write_history(hist, dl).await;
+    release_path(&dl.reserved, &dl.file_path).await;
+    if let Some(app) = app {
+        emit_progress(app, dl, downloaded).await;
+    }
 }
 
 pub(crate) async fn emit_progress(app: &AppHandle, dl: &ActiveDownload, downloaded: u64) {
@@ -743,6 +835,7 @@ async fn run_segment_inner(
             message: format!("download rejected by server{detail}"),
             retriable,
             assist,
+            disk_full: false,
         });
     }
 
@@ -770,6 +863,7 @@ async fn run_segment_inner(
                         .to_string(),
                     retriable: false,
                     assist: true,
+                    disk_full: false,
                 });
             }
         }
@@ -793,8 +887,13 @@ async fn run_segment_inner(
                 if n == 0 {
                     continue;
                 }
-                if file.write_all(&chunk[..n]).await.is_err() {
-                    break;
+                if let Err(e) = file.write_all(&chunk[..n]).await {
+                    if disk::is_disk_full(&e) {
+                        return Err(SegmentError::disk_full(format!(
+                            "Not enough disk space while writing the file: {e}"
+                        )));
+                    }
+                    return Err(SegmentError::permanent(format!("write failed: {e}")));
                 }
                 current += n as u64;
                 update_segment_current(&dl, seg.index, current).await;
@@ -851,6 +950,40 @@ async fn run_download_inner(
         return;
     }
 
+    // Revalidate immediately before touching the file: free space can change
+    // between the early preflight and this run, or since the last resume.
+    if dl.size_known && dl.total_size > 0 {
+        let downloaded = aggregate(&dl).await.0;
+        // A range-less server restarts from zero, so it needs the whole file.
+        let already = if dl.range_supported { downloaded } else { 0 };
+        let remaining = dl.total_size.saturating_sub(already);
+        let dir = dl.file_path.parent().unwrap_or_else(|| Path::new("."));
+        let required = disk::required_bytes(remaining, 0);
+        match disk::available_space(dir) {
+            Ok(available) if disk::fits(available, required) => {}
+            Ok(available) => {
+                let message = format!(
+                    "Not enough disk space in {}: {} still needed, {} free, and Velox keeps a {} safety reserve. You're short {}. Free up space, then resume.",
+                    dir.display(),
+                    disk::human_bytes(remaining),
+                    disk::human_bytes(available),
+                    disk::human_bytes(disk::SAFETY_RESERVE_BYTES),
+                    disk::human_bytes(disk::shortfall(available, required)),
+                );
+                fail_disk_space(app, &dl, resume_dir, hist, message).await;
+                return;
+            }
+            Err(e) => {
+                let message = format!(
+                    "Couldn't determine free space for {}: {e}. Choose another folder, then resume.",
+                    dir.display()
+                );
+                fail_disk_space(app, &dl, resume_dir, hist, message).await;
+                return;
+            }
+        }
+    }
+
     {
         let segs = dl.segments.lock().await;
         // Re-download from scratch when the server can't serve byte ranges: a
@@ -861,9 +994,47 @@ async fn run_download_inner(
         if fresh {
             // Always create the target file. When the size is known we preallocate;
             // for unknown-length responses the file grows as we stream to EOF.
-            if let Ok(f) = File::create(&dl.file_path).await {
-                if dl.total_size > 0 {
-                    let _ = f.set_len(dl.total_size).await;
+            match File::create(&dl.file_path).await {
+                Ok(f) => {
+                    if dl.total_size > 0 {
+                        if let Err(e) = f.set_len(dl.total_size).await {
+                            if disk::is_disk_full(&e) {
+                                let dir = dl
+                                    .file_path
+                                    .parent()
+                                    .unwrap_or_else(|| Path::new("."));
+                                let message = format!(
+                                    "Not enough disk space to allocate {} in {}: {e}.",
+                                    disk::human_bytes(dl.total_size),
+                                    dir.display()
+                                );
+                                fail_disk_space(app, &dl, resume_dir, hist, message).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if disk::is_disk_full(&e) {
+                        let message = format!(
+                            "Not enough disk space to create {}: {e}.",
+                            dl.file_path.display()
+                        );
+                        fail_disk_space(app, &dl, resume_dir, hist, message).await;
+                        return;
+                    }
+                    let message = format!(
+                        "Couldn't create the destination file {}: {e}",
+                        dl.file_path.display()
+                    );
+                    *dl.last_error.lock().await = Some(message);
+                    *dl.status.lock().await = DownloadStatus::Error;
+                    write_history(hist, &dl).await;
+                    release_path(&dl.reserved, &dl.file_path).await;
+                    if let Some(app) = app {
+                        emit_progress(app, &dl, 0).await;
+                    }
+                    return;
                 }
             }
             let segs = split_segments(
@@ -886,6 +1057,7 @@ async fn run_download_inner(
     let mut join: JoinSet<(usize, Result<(), SegmentError>)> = JoinSet::new();
     let mut last_bytes = 0u64;
     let mut last_time = Instant::now();
+    let mut last_space_check = Instant::now();
 
     loop {
         if dl.cancel_flag.load(Ordering::Relaxed) {
@@ -920,6 +1092,29 @@ async fn run_download_inner(
                     break;
                 }
                 let (downloaded, done) = aggregate(&dl).await;
+
+                // Periodically re-check real free space. This also covers
+                // unknown-length downloads, which have no size preflight.
+                if !done && last_space_check.elapsed() >= DISK_CHECK_INTERVAL {
+                    last_space_check = Instant::now();
+                    let dir = dl.file_path.parent().unwrap_or_else(|| Path::new("."));
+                    if let Ok(available) = disk::available_space(dir) {
+                        if available < disk::SAFETY_RESERVE_BYTES {
+                            let message = format!(
+                                "Not enough disk space in {}: only {} is free, and Velox keeps a {} safety reserve. Free up space, then resume.",
+                                dir.display(),
+                                disk::human_bytes(available),
+                                disk::human_bytes(disk::SAFETY_RESERVE_BYTES),
+                            );
+                            join.abort_all();
+                            while join.join_next().await.is_some() {}
+                            reset_unfinished_segments(&dl).await;
+                            fail_disk_space(app, &dl, resume_dir, hist, message).await;
+                            return;
+                        }
+                    }
+                }
+
                 let now = Instant::now();
                 let dt = now.duration_since(last_time).as_secs_f64();
                 let speed = if dt > 0.0 {
@@ -947,6 +1142,7 @@ async fn run_download_inner(
                     join.abort_all();
                     while join.join_next().await.is_some() {}
                     reset_unfinished_segments(&dl).await;
+                    persist_if_resumable(resume_dir, &dl).await;
                     release_path(&dl.reserved, &dl.file_path).await;
                     write_history(hist, &dl).await;
                     if let Some(app) = app {
@@ -991,6 +1187,13 @@ async fn run_download_inner(
                 if let Err(err) = result {
                     if dl.cancel_flag.load(Ordering::Relaxed) || dl.pause_flag.load(Ordering::Relaxed) {
                         continue;
+                    }
+                    if err.disk_full {
+                        join.abort_all();
+                        while join.join_next().await.is_some() {}
+                        reset_unfinished_segments(&dl).await;
+                        fail_disk_space(app, &dl, resume_dir, hist, err.message).await;
+                        return;
                     }
                     let attempts = {
                         let mut retries = dl.retries.lock().await;
@@ -1082,6 +1285,15 @@ pub enum StartError {
     DuplicateActive,
     /// The same URL exists but is paused.
     DuplicatePaused,
+    /// The destination volume does not have enough free space.
+    InsufficientSpace {
+        expected: u64,
+        available: u64,
+        shortfall: u64,
+        path: String,
+    },
+    /// Free space could not be determined; refuse rather than guess.
+    SpaceUnavailable { path: String, detail: String },
 }
 
 impl StartError {
@@ -1089,6 +1301,8 @@ impl StartError {
         match self {
             StartError::DuplicateActive => "ALREADY_DOWNLOADING",
             StartError::DuplicatePaused => "ALREADY_PAUSED",
+            StartError::InsufficientSpace { .. } => "INSUFFICIENT_SPACE",
+            StartError::SpaceUnavailable { .. } => "SPACE_UNAVAILABLE",
         }
     }
 
@@ -1099,23 +1313,68 @@ impl StartError {
                 "This download is paused in Velox. Resume it there, or download another copy."
                     .to_string()
             }
+            StartError::InsufficientSpace {
+                expected,
+                available,
+                shortfall,
+                path,
+            } => format!(
+                "Not enough disk space in {path}: this file is {}, {} is free, and Velox keeps a {} safety reserve. You're short {}. Choose another folder or free up space.",
+                disk::human_bytes(*expected),
+                disk::human_bytes(*available),
+                disk::human_bytes(disk::SAFETY_RESERVE_BYTES),
+                disk::human_bytes(*shortfall),
+            ),
+            StartError::SpaceUnavailable { path, detail } => format!(
+                "Couldn't determine free space for {path}: {detail}. Choose another folder."
+            ),
         }
     }
 
     pub fn to_dto(&self) -> StartErrorDto {
-        StartErrorDto {
+        let mut dto = StartErrorDto {
             code: self.code().to_string(),
             message: self.message(),
+            expected_bytes: None,
+            available_bytes: None,
+            shortfall_bytes: None,
+            path: None,
+        };
+        match self {
+            StartError::InsufficientSpace {
+                expected,
+                available,
+                shortfall,
+                path,
+            } => {
+                dto.expected_bytes = Some(*expected);
+                dto.available_bytes = Some(*available);
+                dto.shortfall_bytes = Some(*shortfall);
+                dto.path = Some(path.clone());
+            }
+            StartError::SpaceUnavailable { path, .. } => {
+                dto.path = Some(path.clone());
+            }
+            _ => {}
         }
+        dto
     }
 }
 
 /// Serializable start failure returned to the frontend (Tauri commands).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartErrorDto {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortfall_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Reserve the first available destination path for `name.extension` in `dir`,
@@ -1183,6 +1442,14 @@ pub async fn begin_download(
     } else {
         PathBuf::from(&request.download_dir)
     };
+
+    // Preflight before reserving a path or creating the output file. Unknown
+    // sizes are monitored during the transfer instead of assumed to be zero.
+    if request.size_known && request.size_bytes > 0 {
+        let active = active_expected_bytes(manager, Some(&request.id)).await;
+        check_known_size_space(&download_dir, request.size_bytes, active)?;
+    }
+
     let (file_path, _final_name) = reserve_path(
         &download_dir,
         &request.name,
@@ -1197,6 +1464,7 @@ pub async fn begin_download(
         url: request.url.clone(),
         file_path,
         total_size: request.size_bytes,
+        size_known: request.size_known,
         range_supported: request.range_supported,
         segment_count: request.segments.clamp(1, max_conn),
         status: Mutex::new(DownloadStatus::Queued),
@@ -1386,25 +1654,43 @@ pub async fn assist_pending_begin(
 /// Chunks from any transfer other than the active one are rejected.
 /// Write one assisted chunk at its absolute offset. Rejects chunks from any
 /// transfer other than the active one, and records activity timestamps.
+#[derive(Debug)]
+enum AssistChunkError {
+    DiskFull(String),
+    Other(String),
+}
+
 async fn apply_assist_chunk(
     dl: &ActiveDownload,
     transfer_id: &str,
     offset: u64,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), AssistChunkError> {
     if dl.assist_transfer.lock().await.as_deref() != Some(transfer_id) {
-        return Err("stale transfer".to_string());
+        return Err(AssistChunkError::Other("stale transfer".to_string()));
     }
     *dl.last_assist_activity.lock().await = Instant::now();
     let mut file = OpenOptions::new()
         .write(true)
         .open(&dl.file_path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AssistChunkError::Other(e.to_string()))?;
     file.seek(SeekFrom::Start(offset))
         .await
-        .map_err(|e| e.to_string())?;
-    file.write_all(data).await.map_err(|e| e.to_string())?;
+        .map_err(|e| AssistChunkError::Other(e.to_string()))?;
+    if let Err(e) = file.write_all(data).await {
+        if disk::is_disk_full(&e) {
+            let dir = dl.file_path.parent().unwrap_or_else(|| Path::new("."));
+            let available = disk::available_space(dir).unwrap_or(0);
+            return Err(AssistChunkError::DiskFull(format!(
+                "Not enough disk space in {}: only {} is free, and Velox keeps a {} safety reserve. Free up space, then retry.",
+                dir.display(),
+                disk::human_bytes(available),
+                disk::human_bytes(disk::SAFETY_RESERVE_BYTES),
+            )));
+        }
+        return Err(AssistChunkError::Other(e.to_string()));
+    }
     let end = offset + data.len() as u64;
     dl.external_bytes.fetch_max(end, Ordering::Relaxed);
     *dl.assist_last_written.lock().await = Instant::now();
@@ -1436,9 +1722,26 @@ pub async fn assist_chunk(
         .get(id)
         .cloned()
         .ok_or("download not found")?;
-    apply_assist_chunk(&dl, transfer_id, offset, data).await?;
-    emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
-    Ok(())
+    match apply_assist_chunk(&dl, transfer_id, offset, data).await {
+        Ok(()) => {
+            emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+            Ok(())
+        }
+        Err(AssistChunkError::DiskFull(message)) => {
+            // Stop the assisted transfer and never let it complete.
+            *dl.assist_transfer.lock().await = None;
+            *dl.assist_pending_transfer.lock().await = None;
+            dl.assist_pending.store(false, Ordering::Relaxed);
+            *dl.last_error.lock().await = Some(message);
+            *dl.status.lock().await = DownloadStatus::Error;
+            persist::delete_state(&state_path(manager, id)).await;
+            release_path(&dl.reserved, &dl.file_path).await;
+            write_history(manager.hist.as_ref(), &dl).await;
+            emit_progress(app, &dl, dl.external_bytes.load(Ordering::Relaxed)).await;
+            Err("not enough disk space".to_string())
+        }
+        Err(AssistChunkError::Other(e)) => Err(e),
+    }
 }
 
 /// Finalize an assisted transfer. Ignored if the active transfer has already
@@ -1454,6 +1757,11 @@ pub async fn assist_complete(
     };
     let mut t = dl.assist_transfer.lock().await;
     if t.as_deref() != Some(transfer_id) {
+        return;
+    }
+    // A disk-full or cancelled transfer must never be finalized as completed.
+    if *dl.status.lock().await == DownloadStatus::Error {
+        *t = None;
         return;
     }
     *t = None;
@@ -1637,6 +1945,7 @@ pub async fn list_downloads(
             url: state.url.clone(),
             file_path,
             total_size: state.total_size,
+            size_known: state.total_size > 0,
             range_supported: state.range_supported,
             segment_count,
             status: Mutex::new(DownloadStatus::Queued),
@@ -1926,6 +2235,7 @@ mod tests {
             url: format!("{base}/file.bin"),
             file_path: file_path.clone(),
             total_size: DATA.len() as u64,
+            size_known: true,
             range_supported: true,
             segment_count: 4,
             status: Mutex::new(DownloadStatus::Queued),
@@ -2003,6 +2313,7 @@ mod tests {
             url: format!("{base}/file.bin"),
             file_path: file_path.clone(),
             total_size: DATA.len() as u64,
+            size_known: true,
             range_supported: true,
             segment_count: 8,
             status: Mutex::new(DownloadStatus::Queued),
@@ -2091,6 +2402,7 @@ mod tests {
             url: format!("{base}/file.bin"),
             file_path: file_path.clone(),
             total_size: 0,
+            size_known: false,
             range_supported: false,
             segment_count: 1,
             status: Mutex::new(DownloadStatus::Queued),
@@ -2188,6 +2500,7 @@ mod tests {
             url: "https://example.com/file.bin".to_string(),
             file_path: file_path.clone(),
             total_size: 0,
+            size_known: false,
             range_supported: false,
             segment_count: 1,
             status: Mutex::new(DownloadStatus::Queued),
@@ -2230,6 +2543,121 @@ mod tests {
         assert!(apply_assist_chunk(&dl, "other", 0, b"XXXX").await.is_err());
         let got = tokio::fs::read(&file_path).await.unwrap();
         assert_eq!(got, DATA);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn insufficient_space_reports_expected_available_and_shortfall() {
+        let dir = std::env::temp_dir();
+        let expected = u64::MAX / 2;
+        match check_known_size_space(&dir, expected, 0) {
+            Err(StartError::InsufficientSpace {
+                expected: reported_expected,
+                available,
+                shortfall,
+                path,
+            }) => {
+                assert_eq!(reported_expected, expected);
+                assert!(available > 0);
+                assert!(shortfall > 0);
+                assert_eq!(path, dir.display().to_string());
+            }
+            other => panic!("expected InsufficientSpace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn small_known_size_fits_a_normal_volume() {
+        assert!(check_known_size_space(&std::env::temp_dir(), 1, 0).is_ok());
+    }
+
+    #[test]
+    fn insufficient_space_dto_carries_structured_fields() {
+        let err = StartError::InsufficientSpace {
+            expected: 10,
+            available: 5,
+            shortfall: 10 + disk::SAFETY_RESERVE_BYTES - 5,
+            path: "/tmp".to_string(),
+        };
+        let dto = err.to_dto();
+        assert_eq!(dto.code, "INSUFFICIENT_SPACE");
+        assert_eq!(dto.expected_bytes, Some(10));
+        assert_eq!(dto.available_bytes, Some(5));
+        assert_eq!(
+            dto.shortfall_bytes,
+            Some(10 + disk::SAFETY_RESERVE_BYTES - 5)
+        );
+        assert_eq!(dto.path.as_deref(), Some("/tmp"));
+
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["expectedBytes"], 10);
+        assert_eq!(json["availableBytes"], 5);
+    }
+
+    #[test]
+    fn disk_full_segment_error_is_not_retriable() {
+        let err = SegmentError::disk_full("full".to_string());
+        assert!(err.disk_full);
+        assert!(!err.retriable);
+        assert!(!err.assist);
+    }
+
+    #[tokio::test]
+    async fn disk_full_failure_never_marks_completed() {
+        let dir = std::env::temp_dir().join(format!("velox-diskfull-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file_path = dir.join("result.bin");
+        tokio::fs::write(&file_path, b"").await.unwrap();
+
+        let dl = Arc::new(ActiveDownload {
+            id: "diskfull".to_string(),
+            url: "https://example.com/file.bin".to_string(),
+            file_path: file_path.clone(),
+            total_size: DATA.len() as u64,
+            size_known: true,
+            range_supported: true,
+            segment_count: 1,
+            status: Mutex::new(DownloadStatus::Downloading),
+            last_error: Mutex::new(None),
+            pause_flag: AtomicBool::new(false),
+            cancel_flag: AtomicBool::new(false),
+            // Every segment is already done: only a disk-space stop can keep
+            // this from being reported as completed.
+            segments: Mutex::new(vec![SegmentState {
+                index: 0,
+                start: 0,
+                end: DATA.len() as u64,
+                current: DATA.len() as u64,
+                state: "done",
+            }]),
+            retries: Mutex::new(HashMap::new()),
+            speed: AtomicU64::new(0),
+            last_state_flush: Mutex::new(Instant::now()),
+            conn_pool: Arc::new(Semaphore::new(4)),
+            run_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            reserved: Arc::new(Mutex::new(HashSet::new())),
+            assist_eligible: AtomicBool::new(false),
+            origin_client: Mutex::new(None),
+            origin_browser: Mutex::new(None),
+            external_bytes: AtomicU64::new(0),
+            assisted: AtomicBool::new(false),
+            assist_pending: AtomicBool::new(false),
+            assist_transfer: Mutex::new(None),
+            assist_pending_transfer: Mutex::new(None),
+            last_assist_activity: Mutex::new(Instant::now()),
+            assist_last_written: Mutex::new(Instant::now()),
+            assist_total: AtomicU64::new(0),
+            assist_last_bytes: AtomicU64::new(0),
+            assist_speed_time: Mutex::new(Instant::now()),
+        });
+
+        assert!(aggregate(&dl).await.1, "precondition: segments are done");
+        fail_disk_space(None, &dl, &dir, None, "disk full".to_string()).await;
+
+        assert_eq!(*dl.status.lock().await, DownloadStatus::Error);
+        assert_ne!(*dl.status.lock().await, DownloadStatus::Completed);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

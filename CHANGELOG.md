@@ -2,6 +2,27 @@
 
 All notable changes to Velox are documented in this file.
 
+## [0.7.0] — 2026-10-24
+
+### Added
+- Destination disk-space preflight: a known-size download is rejected before
+  any transfer when the destination volume can't hold the file, a 256 MiB
+  safety reserve, and space already promised to active downloads. The error
+  shows the file size, free space, and shortfall, with actions to choose
+  another folder or retry.
+- Unknown-size downloads monitor free space during the transfer and stop with a
+  clear disk-space error (never auto-retry).
+
+### Changed
+- Free space is revalidated immediately before creating/preallocating the file
+  and again before a resume.
+- Browser-initiated rejections surface in the extension and in an in-app toast
+  that links to Settings.
+
+### Fixed
+- Disk-full allocation and write failures are non-retriable and can no longer
+  be reported as completed.
+
 ## [0.6.2] — 2026-10-20
 
 ### Fixed

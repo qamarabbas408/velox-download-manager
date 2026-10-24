@@ -16,10 +16,33 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-function errInfo(e: unknown): { code?: string; message: string } {
+interface StartErrorInfo {
+  code?: string;
+  message: string;
+  expectedBytes?: number;
+  availableBytes?: number;
+  shortfallBytes?: number;
+  path?: string;
+}
+
+function errInfo(e: unknown): StartErrorInfo {
   if (e && typeof e === "object" && "message" in e) {
-    const err = e as { code?: string; message?: unknown };
-    return { code: err.code, message: String(err.message ?? "Failed") };
+    const err = e as {
+      code?: string;
+      message?: unknown;
+      expectedBytes?: number;
+      availableBytes?: number;
+      shortfallBytes?: number;
+      path?: string;
+    };
+    return {
+      code: err.code,
+      message: String(err.message ?? "Failed"),
+      expectedBytes: err.expectedBytes,
+      availableBytes: err.availableBytes,
+      shortfallBytes: err.shortfallBytes,
+      path: err.path,
+    };
   }
   return { message: String(e) };
 }
@@ -45,6 +68,7 @@ export function AddDownloadModal({
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [spaceError, setSpaceError] = useState<StartErrorInfo | null>(null);
   const [conflictProbe, setConflictProbe] = useState<ProbeResult | null>(null);
   const [connections, setConnections] = useState(settings.defaultSegments);
   const [downloadDir, setDownloadDir] = useState(settings.downloadDir);
@@ -59,6 +83,7 @@ export function AddDownloadModal({
     if (!isHttpUrl(targetUrl)) return;
     setProbing(true);
     setError(null);
+    setSpaceError(null);
     setProbe(null);
     try {
       if (!isTauri) {
@@ -79,6 +104,7 @@ export function AddDownloadModal({
     setUrl("");
     setProbe(null);
     setError(null);
+    setSpaceError(null);
     setConflictProbe(null);
     setConnections(settings.defaultSegments);
     setDownloadDir(settings.downloadDir);
@@ -121,12 +147,17 @@ export function AddDownloadModal({
 
   const handleBrowse = async () => {
     const dir = await openDialog({ directory: true, title: "Choose download folder", defaultPath: downloadDir });
-    if (typeof dir === "string") setDownloadDir(dir);
+    if (typeof dir === "string") {
+      setDownloadDir(dir);
+      setSpaceError(null);
+    }
   };
 
   const resetForm = () => {
     setUrl("");
     setProbe(null);
+    setError(null);
+    setSpaceError(null);
     setConflictProbe(null);
     setConnections(settings.defaultSegments);
     setDownloadDir(settings.downloadDir);
@@ -134,6 +165,8 @@ export function AddDownloadModal({
 
   const start = async (target: ProbeResult, copy: boolean) => {
     const id = crypto.randomUUID();
+    setSpaceError(null);
+    setError(null);
     const conns = target.rangeSupported ? connections : 1;
     const chunk = conns > 0 ? Math.floor(target.sizeBytes / conns) : 0;
     const segments = Array.from({ length: conns }, (_, i) => ({
@@ -151,6 +184,7 @@ export function AddDownloadModal({
         name: target.name,
         extension: target.extension,
         sizeBytes: target.sizeBytes,
+        sizeKnown: target.sizeKnown,
         downloadDir,
         rangeSupported: target.rangeSupported,
         segments: conns,
@@ -162,6 +196,12 @@ export function AddDownloadModal({
         const info = errInfo(e);
         if (info.code === "ALREADY_PAUSED") {
           setConflictProbe(target);
+          setError(null);
+        } else if (
+          info.code === "INSUFFICIENT_SPACE" ||
+          info.code === "SPACE_UNAVAILABLE"
+        ) {
+          setSpaceError(info);
           setError(null);
         } else {
           setError(info.message);
@@ -236,6 +276,7 @@ export function AddDownloadModal({
                 setUrl(e.target.value);
                 setProbe(null);
                 setError(null);
+                setSpaceError(null);
                 setConflictProbe(null);
               }}
               placeholder="https://example.com/file.zip"
@@ -255,6 +296,67 @@ export function AddDownloadModal({
             <div className="flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2.5">
               <ShieldAlert className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
               <p className="text-xs text-danger min-w-0 break-all leading-relaxed">{error}</p>
+            </div>
+          )}
+
+          {spaceError && (
+            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-3 space-y-2">
+              <div className="flex items-start gap-2">
+                <ShieldAlert className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
+                <p className="text-xs text-danger font-medium">
+                  {spaceError.code === "SPACE_UNAVAILABLE"
+                    ? "Couldn't check free space"
+                    : "Not enough disk space"}
+                </p>
+              </div>
+              {spaceError.code === "INSUFFICIENT_SPACE" && (
+                <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted">
+                  <dt>File size</dt>
+                  <dd className="font-mono text-right text-ink">
+                    {formatBytes(spaceError.expectedBytes ?? 0)}
+                  </dd>
+                  <dt>Available</dt>
+                  <dd className="font-mono text-right text-ink">
+                    {formatBytes(spaceError.availableBytes ?? 0)}
+                  </dd>
+                  <dt>Short by</dt>
+                  <dd className="font-mono text-right text-danger">
+                    {formatBytes(spaceError.shortfallBytes ?? 0)}
+                  </dd>
+                </dl>
+              )}
+              <p className="text-[11px] text-muted leading-relaxed break-words">
+                {spaceError.message}
+              </p>
+              {spaceError.path && (
+                <p className="font-mono text-[11px] text-dim break-all">{spaceError.path}</p>
+              )}
+              <p className="text-[11px] text-dim leading-relaxed">
+                Velox keeps a 256 MiB safety reserve free on the destination. The reserve is
+                not part of the file.
+              </p>
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <button
+                  onClick={handleBrowse}
+                  className="btn-primary text-xs font-medium px-3 py-1.5 rounded-md transition-all"
+                >
+                  Choose another folder
+                </button>
+                <button
+                  onClick={() => {
+                    if (probe) void start(probe, false);
+                  }}
+                  className="bg-raised border border-line text-xs font-medium px-3 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                >
+                  Try again
+                </button>
+                <button
+                  onClick={onClose}
+                  className="text-xs px-2 py-1.5 rounded-md text-muted hover:text-ink transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
 
@@ -301,11 +403,20 @@ export function AddDownloadModal({
                     <p className="font-mono text-[11px] text-dim truncate">{probe.url}</p>
                   </div>
                 </div>
-                <span className="font-mono text-xs text-muted shrink-0">{formatBytes(probe.sizeBytes)}</span>
+                <span className="font-mono text-xs text-muted shrink-0">
+                  {probe.sizeKnown ? formatBytes(probe.sizeBytes) : "Unknown size"}
+                </span>
               </div>
 
               <div className="flex items-center gap-2 text-xs">
-                {probe.rangeSupported ? (
+                {!probe.sizeKnown ? (
+                  <>
+                    <ShieldAlert className="w-3.5 h-3.5 text-danger" />
+                    <span className="text-muted">
+                      Size unknown — Velox will monitor free space while downloading
+                    </span>
+                  </>
+                ) : probe.rangeSupported ? (
                   <>
                     <ShieldCheck className="w-3.5 h-3.5 text-complete" />
                     <span className="text-muted">Server supports <span className="font-mono text-complete">Accept-Ranges: bytes</span> — segmented download available</span>

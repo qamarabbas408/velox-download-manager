@@ -409,6 +409,7 @@ async fn handle_download_request(
                 name: probe.name,
                 extension: probe.extension,
                 size_bytes: probe.size_bytes,
+                size_known: probe.size_known,
                 download_dir: String::new(),
                 range_supported: probe.range_supported,
                 segments: DEFAULT_SEGMENTS,
@@ -426,7 +427,11 @@ async fn handle_download_request(
                     .await;
                 }
                 Err(e) => {
-                    let _ = reply_error(&tx, &env.id, e.code(), &e.message()).await;
+                    let dto = e.to_dto();
+                    // Surface the structured failure in the app as well as the
+                    // extension, so the user can act on it there.
+                    let _ = app.emit("browser://start-error", dto.clone());
+                    let _ = reply_error(&tx, &env.id, &dto.code, &dto.message).await;
                 }
             }
         }

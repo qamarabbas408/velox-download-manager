@@ -53,6 +53,7 @@ export interface ProbeResult {
   name: string;
   extension: string;
   sizeBytes: number;
+  sizeKnown: boolean;
   rangeSupported: boolean;
   contentType: string;
 }
