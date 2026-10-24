@@ -1463,7 +1463,7 @@ pub async fn begin_download(
             .or_else(std::env::home_dir)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
     } else {
-        PathBuf::from(&request.download_dir)
+        PathBuf::from(request.download_dir.trim())
     };
 
     // A removed volume/missing folder must fail clearly rather than being

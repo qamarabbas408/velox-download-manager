@@ -108,8 +108,15 @@ export function AddDownloadModal({
     setConflictProbe(null);
     setConnections(settings.defaultSegments);
     setDownloadDir(settings.downloadDir);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, settings.defaultSegments, settings.downloadDir]);
+
+  // Settings load asynchronously after mount; seed the form from the current
+  // values each time the modal opens.
+  useEffect(() => {
+    if (!open) return;
+    setConnections(settings.defaultSegments);
+    setDownloadDir(settings.downloadDir);
+  }, [open, settings.defaultSegments, settings.downloadDir]);
 
   useEffect(() => {
     if (!open || settings.downloadDir.trim()) return;

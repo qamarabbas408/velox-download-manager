@@ -210,10 +210,14 @@ export default function App() {
   }, []);
 
   const handleSaveSettings = (next: AppSettings) => {
-    setSettings(next);
+    const normalized: AppSettings = {
+      ...next,
+      downloadDir: next.downloadDir.trim(),
+    };
+    setSettings(normalized);
     if (isTauri) {
-      saveSettings(next);
-      setMaxConnections(next.maxConnections).catch(() => {});
+      saveSettings(normalized);
+      setMaxConnections(normalized.maxConnections).catch(() => {});
     }
   };
 

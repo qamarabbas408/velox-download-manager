@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_store::StoreExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, Mutex};
 
@@ -130,6 +131,27 @@ fn new_download_id() -> String {
 /// Tell the UI that the set of connected browser clients changed.
 fn notify_browser_status(app: &AppHandle) {
     let _ = app.emit("browser://status-changed", ());
+}
+
+const SETTINGS_FILE: &str = "settings.json";
+const SETTINGS_KEY: &str = "appSettings";
+
+/// Folder configured in Settings, trimmed. Empty means "use the OS default".
+fn download_dir_from_settings(settings: Option<&serde_json::Value>) -> String {
+    settings
+        .and_then(|value| value.get("downloadDir"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn configured_download_dir(app: &AppHandle) -> String {
+    let Ok(store) = app.store(SETTINGS_FILE) else {
+        return String::new();
+    };
+    let settings = store.get(SETTINGS_KEY);
+    download_dir_from_settings(settings.as_ref())
 }
 
 async fn reply(
@@ -410,7 +432,7 @@ async fn handle_download_request(
                 extension: probe.extension,
                 size_bytes: probe.size_bytes,
                 size_known: probe.size_known,
-                download_dir: String::new(),
+                download_dir: configured_download_dir(&app),
                 range_supported: probe.range_supported,
                 segments: DEFAULT_SEGMENTS,
             };
@@ -603,5 +625,16 @@ mod tests {
         clients.unregister("a", &tx_a2).await;
         assert!(!clients.contains("a").await);
         assert!(clients.first_id().await.is_none());
+    }
+
+    #[test]
+    fn download_dir_from_settings_reads_and_trims() {
+        let value = serde_json::json!({ "downloadDir": "  /tmp/velox  " });
+        assert_eq!(download_dir_from_settings(Some(&value)), "/tmp/velox");
+        assert_eq!(
+            download_dir_from_settings(Some(&serde_json::json!({}))),
+            ""
+        );
+        assert_eq!(download_dir_from_settings(None), "");
     }
 }

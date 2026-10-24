@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X, FolderOpen, SlidersHorizontal } from "lucide-react";
 import type { AppSettings } from "../types";
 
@@ -14,6 +14,12 @@ export function SettingsModal({
   onSave: (settings: AppSettings) => void;
 }) {
   const [draft, setDraft] = useState<AppSettings>(settings);
+
+  // Settings load asynchronously and the modal stays mounted; keep the draft
+  // in sync whenever it opens (or the saved settings change).
+  useEffect(() => {
+    if (open) setDraft(settings);
+  }, [open, settings]);
 
   if (!open) return null;
 
