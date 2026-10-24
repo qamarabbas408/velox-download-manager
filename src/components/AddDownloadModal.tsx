@@ -199,7 +199,8 @@ export function AddDownloadModal({
           setError(null);
         } else if (
           info.code === "INSUFFICIENT_SPACE" ||
-          info.code === "SPACE_UNAVAILABLE"
+          info.code === "SPACE_UNAVAILABLE" ||
+          info.code === "DESTINATION_UNAVAILABLE"
         ) {
           setSpaceError(info);
           setError(null);
@@ -304,9 +305,11 @@ export function AddDownloadModal({
               <div className="flex items-start gap-2">
                 <ShieldAlert className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
                 <p className="text-xs text-danger font-medium">
-                  {spaceError.code === "SPACE_UNAVAILABLE"
-                    ? "Couldn't check free space"
-                    : "Not enough disk space"}
+                  {spaceError.code === "INSUFFICIENT_SPACE"
+                    ? "Not enough disk space"
+                    : spaceError.code === "DESTINATION_UNAVAILABLE"
+                      ? "Destination unavailable"
+                      : "Couldn't check free space"}
                 </p>
               </div>
               {spaceError.code === "INSUFFICIENT_SPACE" && (
@@ -331,10 +334,12 @@ export function AddDownloadModal({
               {spaceError.path && (
                 <p className="font-mono text-[11px] text-dim break-all">{spaceError.path}</p>
               )}
-              <p className="text-[11px] text-dim leading-relaxed">
-                Velox keeps a 256 MiB safety reserve free on the destination. The reserve is
-                not part of the file.
-              </p>
+              {spaceError.code !== "DESTINATION_UNAVAILABLE" && (
+                <p className="text-[11px] text-dim leading-relaxed">
+                  Velox keeps a 256 MiB safety reserve free on the destination. The reserve is
+                  not part of the file.
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-2 pt-0.5">
                 <button
                   onClick={handleBrowse}

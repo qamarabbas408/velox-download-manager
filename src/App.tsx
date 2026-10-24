@@ -154,15 +154,19 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     onBrowserStartError((e) => {
       const isSpace =
-        e.code === "INSUFFICIENT_SPACE" || e.code === "SPACE_UNAVAILABLE";
+        e.code === "INSUFFICIENT_SPACE" ||
+        e.code === "SPACE_UNAVAILABLE" ||
+        e.code === "DESTINATION_UNAVAILABLE";
       setToast({
         id: `start-error-${e.code}`,
         title:
           e.code === "INSUFFICIENT_SPACE"
             ? "Not enough disk space"
-            : e.code === "SPACE_UNAVAILABLE"
-              ? "Couldn't check free space"
-              : "Download rejected",
+            : e.code === "DESTINATION_UNAVAILABLE"
+              ? "Destination unavailable"
+              : e.code === "SPACE_UNAVAILABLE"
+                ? "Couldn't check free space"
+                : "Download rejected",
         label: e.message,
         action: isSpace ? "settings" : undefined,
         tone: "error",

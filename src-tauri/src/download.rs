@@ -554,6 +554,11 @@ fn check_known_size_space(
     expected: u64,
     active_expected: u64,
 ) -> Result<(), StartError> {
+    if !dir.is_dir() {
+        return Err(StartError::DestinationUnavailable {
+            path: dir.display().to_string(),
+        });
+    }
     let required = disk::required_bytes(expected, active_expected);
     match disk::available_space(dir) {
         Ok(available) if disk::fits(available, required) => Ok(()),
@@ -952,12 +957,21 @@ async fn run_download_inner(
 
     // Revalidate immediately before touching the file: free space can change
     // between the early preflight and this run, or since the last resume.
+    let dest_dir = dl.file_path.parent().unwrap_or_else(|| Path::new("."));
+    if !dest_dir.is_dir() {
+        let message = format!(
+            "The destination folder is not available: {}. Choose another folder or reconnect the drive.",
+            dest_dir.display()
+        );
+        fail_disk_space(app, &dl, resume_dir, hist, message).await;
+        return;
+    }
     if dl.size_known && dl.total_size > 0 {
         let downloaded = aggregate(&dl).await.0;
         // A range-less server restarts from zero, so it needs the whole file.
         let already = if dl.range_supported { downloaded } else { 0 };
         let remaining = dl.total_size.saturating_sub(already);
-        let dir = dl.file_path.parent().unwrap_or_else(|| Path::new("."));
+        let dir = dest_dir;
         let required = disk::required_bytes(remaining, 0);
         match disk::available_space(dir) {
             Ok(available) if disk::fits(available, required) => {}
@@ -1294,6 +1308,8 @@ pub enum StartError {
     },
     /// Free space could not be determined; refuse rather than guess.
     SpaceUnavailable { path: String, detail: String },
+    /// The destination folder/volume is gone or not reachable.
+    DestinationUnavailable { path: String },
 }
 
 impl StartError {
@@ -1303,6 +1319,7 @@ impl StartError {
             StartError::DuplicatePaused => "ALREADY_PAUSED",
             StartError::InsufficientSpace { .. } => "INSUFFICIENT_SPACE",
             StartError::SpaceUnavailable { .. } => "SPACE_UNAVAILABLE",
+            StartError::DestinationUnavailable { .. } => "DESTINATION_UNAVAILABLE",
         }
     }
 
@@ -1327,6 +1344,9 @@ impl StartError {
             ),
             StartError::SpaceUnavailable { path, detail } => format!(
                 "Couldn't determine free space for {path}: {detail}. Choose another folder."
+            ),
+            StartError::DestinationUnavailable { path } => format!(
+                "The destination folder is not available: {path}. Choose another folder or reconnect the drive."
             ),
         }
     }
@@ -1353,6 +1373,9 @@ impl StartError {
                 dto.path = Some(path.clone());
             }
             StartError::SpaceUnavailable { path, .. } => {
+                dto.path = Some(path.clone());
+            }
+            StartError::DestinationUnavailable { path } => {
                 dto.path = Some(path.clone());
             }
             _ => {}
@@ -1442,6 +1465,14 @@ pub async fn begin_download(
     } else {
         PathBuf::from(&request.download_dir)
     };
+
+    // A removed volume/missing folder must fail clearly rather than being
+    // reported as low disk space.
+    if !download_dir.is_dir() {
+        return Err(StartError::DestinationUnavailable {
+            path: download_dir.display().to_string(),
+        });
+    }
 
     // Preflight before reserving a path or creating the output file. Unknown
     // sizes are monitored during the transfer instead of assumed to be zero.
@@ -2660,5 +2691,23 @@ mod tests {
         assert_ne!(*dl.status.lock().await, DownloadStatus::Completed);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn missing_destination_is_not_reported_as_low_space() {
+        let missing = std::env::temp_dir()
+            .join(format!("velox-missing-{}", std::process::id()))
+            .join("sub");
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let err = check_known_size_space(&missing, 1, 0)
+            .expect_err("a missing destination must be rejected");
+        assert_eq!(err.code(), "DESTINATION_UNAVAILABLE");
+        assert!(err.message().contains("not available"));
+        assert!(!err.message().to_lowercase().contains("disk space"));
+        assert_eq!(
+            err.to_dto().path,
+            Some(missing.display().to_string())
+        );
     }
 }
