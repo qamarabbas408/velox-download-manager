@@ -7,39 +7,24 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use sysinfo::Disks;
-
 /// Space kept free on the destination volume: the file itself must fit, plus
 /// this reserve, so a download never consumes the last usable bytes.
 pub const SAFETY_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Free bytes on the volume that contains `path`.
 ///
-/// Resolves the nearest existing ancestor (the destination directory may not
-/// exist yet) and matches it to the longest mounted volume. Returns an error
-/// when no volume matches so the caller can reject the download.
+/// Queries the filesystem directly (so secondary, removable, network, and
+/// mounted-image volumes are handled correctly) after resolving the nearest
+/// existing ancestor. Returns an error when it cannot be determined.
 pub fn available_space(path: &Path) -> io::Result<u64> {
     let probe = nearest_existing(path)?;
-    #[cfg(windows)]
-    let probe = normalize_windows_path(&probe);
-    let disks = Disks::new_with_refreshed_list();
-
-    let mut best: Option<(usize, u64)> = None;
-    for disk in disks.list() {
-        let mount = disk.mount_point();
-        if !starts_with_path(&probe, mount) {
-            continue;
-        }
-        let len = mount.as_os_str().len();
-        if best.map_or(true, |(best_len, _)| len > best_len) {
-            best = Some((len, disk.available_space()));
-        }
-    }
-
-    best.map(|(_, bytes)| bytes).ok_or_else(|| {
+    fs4::available_space(&probe).map_err(|e| {
         io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("could not determine the volume for {}", path.display()),
+            e.kind(),
+            format!(
+                "could not determine free space for {}: {e}",
+                path.display()
+            ),
         )
     })
 }
@@ -75,36 +60,6 @@ fn nearest_existing(path: &Path) -> io::Result<PathBuf> {
             }
         }
     }
-}
-
-#[cfg(not(windows))]
-fn starts_with_path(path: &Path, base: &Path) -> bool {
-    path.starts_with(base)
-}
-
-#[cfg(windows)]
-fn normalize_windows_path(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{rest}"))
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        path.to_path_buf()
-    }
-}
-
-#[cfg(windows)]
-fn starts_with_path(path: &Path, base: &Path) -> bool {
-    let p: Vec<String> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
-        .collect();
-    let b: Vec<String> = base
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
-        .collect();
-    p.len() >= b.len() && p[..b.len()] == b[..]
 }
 
 /// True when an I/O error means the destination is out of space.
